@@ -92,7 +92,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
         eventPaths: ?*anyopaque,
         eventFlags: [*c]const c.FSEventStreamEventFlags,
         eventIds: [*c]const c.FSEventStreamEventId,
-    ) callconv(.C) void {
+    ) callconv(.c) void {
         _ = streamRef;
         _ = eventIds;
 
