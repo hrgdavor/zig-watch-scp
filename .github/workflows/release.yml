@@ -38,9 +38,13 @@ jobs:
         with:
           version: 0.15.2
 
+      - name: Set macOS SDK root
+        if: runner.os == 'macOS'
+        run: echo "ZIG_SYSROOT=--sysroot $(xcrun --show-sdk-path)" >> $GITHUB_ENV
+
       - name: Build
         run: |
-          zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe --summary all
+          zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe ${{ env.ZIG_SYSROOT }} --summary all
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
