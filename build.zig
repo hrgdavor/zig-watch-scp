@@ -65,6 +65,9 @@ pub fn build(b: *std.Build) void {
 
     if (use_coreservices) {
         exe.linkFramework("CoreServices");
+        if (b.sysroot) |sysroot| {
+            exe.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
+        }
     }
 
     // Cross-building for macOS from non-macOS hosts may not have CoreServices SDK available.
