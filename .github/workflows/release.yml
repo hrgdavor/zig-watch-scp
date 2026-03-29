@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Build for ${{ matrix.os }}
+    name: Build for ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -15,19 +15,19 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-linux
             artifact_name: sync
-            asset_name: sync-linux-x86_64
+            archive_name: sync-linux-x86_64.tar.gz
           - os: windows-latest
             target: x86_64-windows
             artifact_name: sync.exe
-            asset_name: sync-windows-x86_64.exe
+            archive_name: sync-windows-x86_64.zip
           - os: macos-latest
             target: x86_64-macos
             artifact_name: sync
-            asset_name: sync-macos-x86_64
+            archive_name: sync-macos-x86_64.tar.gz
           - os: macos-latest
             target: aarch64-macos
             artifact_name: sync
-            asset_name: sync-macos-aarch64
+            archive_name: sync-macos-aarch64.tar.gz
 
     steps:
       - name: Checkout code
@@ -43,14 +43,21 @@ jobs:
         run: echo "ZIG_SYSROOT=--sysroot $(xcrun --show-sdk-path)" >> $GITHUB_ENV
 
       - name: Build
-        run: |
-          zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe ${{ env.ZIG_SYSROOT }} --summary all
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe ${{ env.ZIG_SYSROOT }} --summary all
+
+      - name: Package (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: tar -czf ${{ matrix.archive_name }} -C zig-out/bin ${{ matrix.artifact_name }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path zig-out\bin\${{ matrix.artifact_name }} -DestinationPath ${{ matrix.archive_name }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: zig-out/bin/${{ matrix.artifact_name }}
+          name: ${{ matrix.archive_name }}
+          path: ${{ matrix.archive_name }}
 
   release:
     name: Create Release
@@ -66,15 +73,16 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/sync-linux-x86_64/sync
-            artifacts/sync-windows-x86_64.exe/sync.exe
-            artifacts/sync-macos-x86_64/sync
-            artifacts/sync-macos-aarch64/sync
+            artifacts/sync-linux-x86_64.tar.gz
+            artifacts/sync-windows-x86_64.zip
+            artifacts/sync-macos-x86_64.tar.gz
+            artifacts/sync-macos-aarch64.tar.gz
           draft: false
           prerelease: false
           generate_release_notes: true
