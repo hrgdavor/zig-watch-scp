@@ -1,0 +1,78 @@
+name: Release Builds
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux
+            artifact_name: sync
+            asset_name: sync-linux-x86_64
+          - os: windows-latest
+            target: x86_64-windows
+            artifact_name: sync.exe
+            asset_name: sync-windows-x86_64.exe
+          - os: macos-latest
+            target: x86_64-macos
+            artifact_name: sync
+            asset_name: sync-macos-x86_64
+          - os: macos-latest
+            target: aarch64-macos
+            artifact_name: sync
+            asset_name: sync-macos-aarch64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: |
+          zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSmall --summary all
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: zig-out/bin/${{ matrix.artifact_name }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/sync-linux-x86_64/sync
+            artifacts/sync-windows-x86_64.exe/sync.exe
+            artifacts/sync-macos-x86_64/sync
+            artifacts/sync-macos-aarch64/sync
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

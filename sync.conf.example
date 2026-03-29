@@ -1,0 +1,69 @@
+# === Global Connection Settings ===
+host=1.2.3.4
+username=user
+
+# SSH password (optional if key_path is used)
+# password=secret
+
+# SSH private key path (optional, overrides password auth if provided)
+key_path=~/.ssh/id_rsa
+
+# Passphrase for the private key (optional)
+# passphrase=secret
+
+# Number of parallel threads for initial sync across all folders (default: 4)
+parallel_threads=8
+
+# Delay in milliseconds before starting sync after a change is detected (default: 200)
+# Helps handle editors that save files in multiple steps (e.g. delete/create or multiple writes)
+watch_delay_ms=500
+
+# Enable SSH compression for faster transfers over slow connections (default: false)
+compress=true
+
+# Remote cleanup: remove files on remote that are not present locally
+# This is performed during initial synchronization.
+cleanup=false
+
+# Text file extensions (for line ending normalization)
+# text_extensions=.txt, .md, .zig, .java
+
+# === Folder Synchronization Pairs ===
+# You must define one or more folder sections. Each section starts with [folder].
+
+[folder]
+scpdb=.scpdb
+# create an index in local folder, optional, default .scpdb
+local_db=false
+# Local directory to watch and sync
+local_dir=./src
+# Remote directory to sync to
+remote_dir=/opt/project/src
+# Include patterns (comma-separated, optional)
+includes=*.zig, *.h
+# Exclude patterns (comma-separated, optional)
+excludes=**/temp/**, **/*.tmp
+
+[folder]
+local_dir=./docs
+remote_dir=/opt/project/docs
+excludes=**/*.bak, .~*
+
+# === Local-only copy workers (no SSH) ===
+# [local-folder] serves as a target directory and expects one or more [source] entries.
+
+[local-folder]
+dest_dir=./build
+
+[source]
+local_dir=./src
+includes=**/*.zig
+excludes=**/*.tmp
+
+[source]
+local_dir=./assets
+
+# === Command executed on remote after successful sync (optional) ===
+# exec_cmd=touch /tmp/synced
+# alias: exec=...
+

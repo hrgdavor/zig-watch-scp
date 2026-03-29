@@ -1,0 +1,30 @@
+# Zig build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+
+# Sync tool artifacts
+.scpdb
+.scpdb.tmp
+sync.conf
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+build_log*
+build_err*
+sync_console.txt
+sync_out.txt
+sync_probe.txt
+sync_test*
+sync_log*
+build_error.txt
+.ssh
