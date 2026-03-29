@@ -29,7 +29,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
 
         const paths_array = c.CFArrayCreate(
             null,
-            @ptrCast(&path_cfstring),
+            @ptrCast(@constCast(&path_cfstring)),
             1,
             null,
         ) orelse return error.CFArrayCreateFailed;
