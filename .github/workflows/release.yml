@@ -40,7 +40,7 @@ jobs:
 
       - name: Build
         run: |
-          zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSmall --summary all
+          zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe --summary all
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

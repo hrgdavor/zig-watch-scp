@@ -6,10 +6,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode") orelse .ReleaseSafe;
 
-    const zlib_dep = b.dependency("zlib", .{
+    const use_zlib = target.result.os.tag != .windows;
+
+    const zlib_dep = if (use_zlib) b.dependency("zlib", .{
         .target = target,
         .optimize = optimize,
-    });
+    }) else null;
 
     const mbedtls_dep = b.dependency("mbedtls", .{
         .target = target,
@@ -21,11 +23,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .@"crypto-backend" = .mbedtls,
         .@"link-system-crypto-backend" = false,
-        .zlib = true,
+        .zlib = use_zlib,
     });
 
     const ssh2_lib = libssh2_dep.artifact("ssh2");
-    ssh2_lib.linkLibrary(zlib_dep.artifact("z"));
+    if (use_zlib) {
+        ssh2_lib.linkLibrary(zlib_dep.?.artifact("z"));
+    }
     ssh2_lib.linkLibrary(mbedtls_dep.artifact("mbedtls"));
 
     const simargs_dep = b.dependency("simargs", .{
@@ -46,7 +50,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    exe.linkLibrary(zlib_dep.artifact("z"));
+    if (use_zlib) {
+        exe.linkLibrary(zlib_dep.?.artifact("z"));
+    }
     exe.linkLibrary(mbedtls_dep.artifact("mbedtls"));
     exe.linkLibrary(libssh2_dep.artifact("ssh2"));
     exe.linkLibC();
@@ -58,8 +64,11 @@ pub fn build(b: *std.Build) void {
         exe.root_module.strip = true;
     }
 
-    b.installArtifact(exe);
+    const install_exe = b.addInstallArtifact(exe, .{
+        .dest_dir = .{ .override = .prefix },
+    });
 
+    b.getInstallStep().dependOn(&install_exe.step);
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
