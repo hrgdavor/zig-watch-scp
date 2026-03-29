@@ -268,6 +268,41 @@ if (use_zlib) {
 
 ---
 
+### 9. Binary output path: `zig-out/` not `zig-out/bin/`
+
+**Symptom:**  
+The release workflow packaged `zig-out/bin/sync` but the binary was not there — the archive
+was empty or the step errored with "file not found".
+
+**Cause:**  
+By default `zig build` places binaries in `zig-out/bin/`. However, this project's `build.zig`
+overrides the destination dir:
+
+```zig
+const install_exe = b.addInstallArtifact(exe, .{
+    .dest_dir = .{ .override = .prefix },
+});
+```
+
+`.override = .prefix` places the binary **directly** in `zig-out/` (i.e. `zig-out/sync`,
+`zig-out/sync.exe`), bypassing the `bin/` subdirectory.
+
+**Fix — packaging commands must point to `zig-out/` not `zig-out/bin/`:**
+
+```yaml
+# WRONG — default assumption
+- run: tar -czf archive.tar.gz -C zig-out/bin sync
+
+# CORRECT — matches .dest_dir = .{ .override = .prefix }
+- run: tar -czf archive.tar.gz -C zig-out sync          # Linux/macOS
+- run: Compress-Archive -Path zig-out\sync.exe …        # Windows
+```
+
+**Rule of thumb:** Always check `build.zig` for `dest_dir` overrides before writing packaging
+commands. If `.override = .prefix` is set, strip the `bin/` segment from all paths.
+
+---
+
 ## Recommended Zig Action
 
 Always use `mlugg/setup-zig@v2`. It uses official Zig download mirrors and handles version
