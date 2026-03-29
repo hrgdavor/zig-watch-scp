@@ -20,7 +20,7 @@ jobs:
             target: x86_64-windows
             artifact_name: sync.exe
             asset_name: sync-windows-x86_64.exe
-          - os: macos-13
+          - os: macos-latest
             target: x86_64-macos
             artifact_name: sync
             asset_name: sync-macos-x86_64
