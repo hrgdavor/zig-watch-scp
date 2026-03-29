@@ -67,6 +67,7 @@ pub fn build(b: *std.Build) void {
         exe.linkFramework("CoreServices");
         if (b.sysroot) |sysroot| {
             exe.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
+            exe.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
         }
     }
 
