@@ -59,7 +59,7 @@ pub fn build(b: *std.Build) void {
     exe.linkLibC();
 
     const build_opts = b.addOptions();
-    const use_coreservices = target.result.os.tag == .macos and builtin.os.tag == .macos;
+    const use_coreservices = target.result.os.tag == .macos and builtin.os.tag == .macos and target.result.cpu.arch == builtin.cpu.arch;
     build_opts.addOption(bool, "use_coreservices", use_coreservices);
     exe.root_module.addOptions("build_options", build_opts);
 
