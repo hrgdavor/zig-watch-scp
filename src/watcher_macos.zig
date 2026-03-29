@@ -2,12 +2,16 @@
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
 const watcher = @import("watcher.zig");
+const bopts = @import("build_options");
 
-const c = @cImport({
+// Only compile CoreServices C headers when building natively on macOS.
+// Cross-compiled builds (e.g. from Windows) fall back to a polling watcher.
+const c = if (bopts.use_coreservices) @cImport({
     @cInclude("CoreServices/CoreServices.h");
-});
+}) else struct {};
 
-pub const MacOsWatcher = struct {
+pub const MacOsWatcher = if (bopts.use_coreservices) struct {
+    // --- FSEvents implementation (native macOS build) ---
     allocator: std.mem.Allocator,
     base_path: []const u8,
     stream: c.FSEventStreamRef,
@@ -15,7 +19,7 @@ pub const MacOsWatcher = struct {
     event_queue: std.ArrayList(watcher.FileChange),
     mutex: std.Thread.Mutex,
 
-    pub fn init(allocator: std.mem.Allocator, path: []const u8) !MacOsWatcher {
+    pub fn init(allocator: std.mem.Allocator, path: []const u8) !@This() {
         const path_cfstring = c.CFStringCreateWithCString(
             null,
             path.ptr,
@@ -31,7 +35,7 @@ pub const MacOsWatcher = struct {
         ) orelse return error.CFArrayCreateFailed;
         defer c.CFRelease(paths_array);
 
-        var self = MacOsWatcher{
+        var self = @This(){
             .allocator = allocator,
             .base_path = try allocator.dupe(u8, path),
             .stream = undefined,
@@ -54,7 +58,7 @@ pub const MacOsWatcher = struct {
             &context,
             paths_array,
             c.kFSEventStreamEventIdSinceNow,
-            0.1, // latency in seconds
+            0.1,
             c.kFSEventStreamCreateFlagFileEvents | c.kFSEventStreamCreateFlagNoDefer,
         ) orelse return error.FSEventStreamCreateFailed;
 
@@ -69,7 +73,7 @@ pub const MacOsWatcher = struct {
         return self;
     }
 
-    pub fn deinit(self: *MacOsWatcher) void {
+    pub fn deinit(self: *@This()) void {
         c.FSEventStreamStop(self.stream);
         c.FSEventStreamInvalidate(self.stream);
         c.FSEventStreamRelease(self.stream);
@@ -92,7 +96,7 @@ pub const MacOsWatcher = struct {
         _ = streamRef;
         _ = eventIds;
 
-        const self: *MacOsWatcher = @ptrCast(@alignCast(clientCallBackInfo));
+        const self: *@This() = @ptrCast(@alignCast(clientCallBackInfo));
         const paths: [*][*:0]const u8 = @ptrCast(@alignCast(eventPaths));
 
         var i: usize = 0;
@@ -100,7 +104,6 @@ pub const MacOsWatcher = struct {
             const path = std.mem.span(paths[i]);
             const flags = eventFlags[i];
 
-            // Get relative path
             const rel_path = if (std.mem.startsWith(u8, path, self.base_path))
                 path[self.base_path.len..]
             else
@@ -131,8 +134,7 @@ pub const MacOsWatcher = struct {
         }
     }
 
-    pub fn nextEvent(self: *MacOsWatcher) !?watcher.FileChange {
-        // Run the run loop briefly to process events
+    pub fn nextEvent(self: *@This()) !?watcher.FileChange {
         _ = c.CFRunLoopRunInMode(c.kCFRunLoopDefaultMode, 0.01, 1);
 
         self.mutex.lock();
@@ -145,9 +147,114 @@ pub const MacOsWatcher = struct {
         return null;
     }
 
-    pub fn wait(self: *MacOsWatcher, timeout_ms: u32) !void {
+    pub fn wait(self: *@This(), timeout_ms: u32) !void {
         _ = self;
         const timeout_seconds: f64 = @as(f64, @floatFromInt(timeout_ms)) / 1000.0;
         _ = c.CFRunLoopRunInMode(c.kCFRunLoopDefaultMode, timeout_seconds, 0);
+    }
+} else struct {
+    // --- Polling fallback for cross-compiled macOS builds (no CoreServices SDK) ---
+    const FileState = struct { mtime_ns: i128 };
+
+    allocator: std.mem.Allocator,
+    base_path: []const u8,
+    state: std.StringHashMap(FileState),
+    pending: std.ArrayList(watcher.FileChange),
+
+    pub fn init(allocator: std.mem.Allocator, path: []const u8) !@This() {
+        var self = @This(){
+            .allocator = allocator,
+            .base_path = try allocator.dupe(u8, path),
+            .state = std.StringHashMap(FileState).init(allocator),
+            .pending = std.ArrayList(watcher.FileChange).empty,
+        };
+        errdefer allocator.free(self.base_path);
+        errdefer self.state.deinit();
+        try self.scanInto(path, &self.state);
+        return self;
+    }
+
+    pub fn deinit(self: *@This()) void {
+        var it = self.state.keyIterator();
+        while (it.next()) |key| self.allocator.free(key.*);
+        self.state.deinit();
+        for (self.pending.items) |event| self.allocator.free(event.path);
+        self.pending.deinit(self.allocator);
+        self.allocator.free(self.base_path);
+    }
+
+    fn scanInto(self: *@This(), path: []const u8, out: *std.StringHashMap(FileState)) !void {
+        var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch return;
+        defer dir.close();
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            const full = try std.fs.path.join(self.allocator, &.{ path, entry.name });
+            defer self.allocator.free(full);
+            const rel = std.mem.trimLeft(u8, full[self.base_path.len..], "/");
+            if (entry.kind == .file) {
+                const stat = std.fs.cwd().statFile(full) catch continue;
+                const key = try self.allocator.dupe(u8, rel);
+                try out.put(key, .{ .mtime_ns = stat.mtime });
+            } else if (entry.kind == .directory) {
+                try self.scanInto(full, out);
+            }
+        }
+    }
+
+    fn poll(self: *@This()) !void {
+        var new_state = std.StringHashMap(FileState).init(self.allocator);
+        errdefer {
+            var nit = new_state.keyIterator();
+            while (nit.next()) |key| self.allocator.free(key.*);
+            new_state.deinit();
+        }
+        try self.scanInto(self.base_path, &new_state);
+
+        // Detect modified and created
+        var nit = new_state.iterator();
+        while (nit.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (self.state.get(key)) |old| {
+                if (entry.value_ptr.mtime_ns != old.mtime_ns) {
+                    try self.pending.append(self.allocator, .{
+                        .path = try self.allocator.dupe(u8, key),
+                        .kind = .modified,
+                    });
+                }
+            } else {
+                try self.pending.append(self.allocator, .{
+                    .path = try self.allocator.dupe(u8, key),
+                    .kind = .created,
+                });
+            }
+        }
+
+        // Detect deleted
+        var oit = self.state.keyIterator();
+        while (oit.next()) |key| {
+            if (!new_state.contains(key.*)) {
+                try self.pending.append(self.allocator, .{
+                    .path = try self.allocator.dupe(u8, key.*),
+                    .kind = .deleted,
+                });
+            }
+        }
+
+        // Swap state: free old keys, adopt new_state
+        var old_it = self.state.keyIterator();
+        while (old_it.next()) |key| self.allocator.free(key.*);
+        self.state.deinit();
+        self.state = new_state;
+    }
+
+    pub fn nextEvent(self: *@This()) anyerror!?watcher.FileChange {
+        if (self.pending.items.len == 0) try self.poll();
+        if (self.pending.items.len > 0) return self.pending.orderedRemove(0);
+        return null;
+    }
+
+    pub fn wait(self: *@This(), timeout_ms: u32) !void {
+        std.Thread.sleep(@as(u64, timeout_ms) * std.time.ns_per_ms);
+        try self.poll();
     }
 };

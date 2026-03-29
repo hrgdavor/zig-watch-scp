@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-GPL-3.0-with-Commons-Clause
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -57,9 +58,17 @@ pub fn build(b: *std.Build) void {
     exe.linkLibrary(libssh2_dep.artifact("ssh2"));
     exe.linkLibC();
 
-    if (target.result.os.tag == .macos) {
+    const build_opts = b.addOptions();
+    const use_coreservices = target.result.os.tag == .macos and builtin.os.tag == .macos;
+    build_opts.addOption(bool, "use_coreservices", use_coreservices);
+    exe.root_module.addOptions("build_options", build_opts);
+
+    if (use_coreservices) {
         exe.linkFramework("CoreServices");
     }
+
+    // Cross-building for macOS from non-macOS hosts may not have CoreServices SDK available.
+    // In that case, skip framework linking to avoid invalid toolchain errors.
     if (optimize != .Debug) {
         exe.root_module.strip = true;
     }
