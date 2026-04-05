@@ -10,6 +10,8 @@ pub const Folder = struct {
     remote_dir: []const u8,
     include_patterns: []const []const u8,
     exclude_patterns: []const []const u8,
+    trigger_from: ?[]const u8,
+    trigger_to: ?[]const u8,
 };
 
 pub const LocalSource = struct {
@@ -464,6 +466,8 @@ pub const Config = struct {
         var cur_remote_dir: ?[]const u8 = null;
         var cur_includes = std.ArrayList([]const u8).empty;
         var cur_excludes = std.ArrayList([]const u8).empty;
+        var cur_trigger_from: ?[]const u8 = null;
+        var cur_trigger_to: ?[]const u8 = null;
 
         var cur_dest_dir: ?[]const u8 = null;
         var cur_sources = std.ArrayList(LocalSource).empty;
@@ -478,8 +482,10 @@ pub const Config = struct {
                 r_dir: *?[]const u8,
                 inc: *std.ArrayList([]const u8),
                 exc: *std.ArrayList([]const u8),
+                t_from: *?[]const u8,
+                t_to: *?[]const u8,
             ) !void {
-                if (l_dir.* == null and r_dir.* == null and inc.items.len == 0 and exc.items.len == 0) return;
+                if (l_dir.* == null and r_dir.* == null and inc.items.len == 0 and exc.items.len == 0 and t_to.* == null) return;
                 try f_list.append(alloc, .{
                     .scpdb = scpdb.* orelse try alloc.dupe(u8, ".scpdb"),
                     .local_db = local_db,
@@ -487,10 +493,14 @@ pub const Config = struct {
                     .remote_dir = r_dir.* orelse try alloc.dupe(u8, "."),
                     .include_patterns = try inc.toOwnedSlice(alloc),
                     .exclude_patterns = try exc.toOwnedSlice(alloc),
+                    .trigger_from = t_from.*,
+                    .trigger_to = t_to.*,
                 });
                 l_dir.* = null;
                 r_dir.* = null;
                 scpdb.* = null;
+                t_from.* = null;
+                t_to.* = null;
             }
         }.push;
 
@@ -534,7 +544,7 @@ pub const Config = struct {
             if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
             if (std.mem.eql(u8, trimmed, "[folder]")) {
-                if (section == .folder) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes);
+                if (section == .folder) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to);
                 if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
                 if (section == .local_folder) try pushLocalWorker(allocator, &local_copy_workers, &cur_dest_dir, &cur_sources);
                 section = .folder;
@@ -543,7 +553,7 @@ pub const Config = struct {
             }
 
             if (std.mem.eql(u8, trimmed, "[local-folder]")) {
-                if (section == .folder) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes);
+                if (section == .folder) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to);
                 if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
                 if (section == .local_folder) try pushLocalWorker(allocator, &local_copy_workers, &cur_dest_dir, &cur_sources);
                 section = .local_folder;
@@ -551,7 +561,7 @@ pub const Config = struct {
             }
 
             if (std.mem.eql(u8, trimmed, "[source]")) {
-                if (section == .folder) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes);
+                if (section == .folder) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to);
                 if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
                 section = .source;
                 continue;
@@ -612,11 +622,19 @@ pub const Config = struct {
                     if (section == .folder) {
                         cur_local_db = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "yes");
                     }
+                } else if (std.mem.eql(u8, key, "trigger_from")) {
+                    if (section == .folder) {
+                        cur_trigger_from = try allocator.dupe(u8, value);
+                    }
+                } else if (std.mem.eql(u8, key, "trigger_to")) {
+                    if (section == .folder) {
+                        cur_trigger_to = try allocator.dupe(u8, value);
+                    }
                 }
             }
         }
 
-        if (section == .folder) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes);
+        if (section == .folder) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to);
         if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
         if (section == .local_folder or section == .source) try pushLocalWorker(allocator, &local_copy_workers, &cur_dest_dir, &cur_sources);
 

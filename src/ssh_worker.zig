@@ -121,6 +121,8 @@ pub fn performInitialSync(
         };
     }
 
+    try performSyncTrigger(allocator, config, folder, ssh);
+
     std.debug.print("Initial sync complete for {s}!\n", .{folder.local_dir});
 }
 
@@ -386,6 +388,8 @@ pub fn processReadySync(
         };
     }
 
+    try performSyncTrigger(allocator, config, fs.folder, ssh);
+
     std.debug.print("[{s}] Synced: {s}\n\n", .{ fs.folder.local_dir, rel_path });
 }
 
@@ -400,6 +404,28 @@ pub fn shouldSyncFile(path: []const u8, folder: *const Folder) bool {
         return false;
     }
     return true;
+}
+
+pub fn performSyncTrigger(
+    allocator: std.mem.Allocator,
+    config: *const Config,
+    folder: *const Folder,
+    ssh: *SshSession,
+) !void {
+    _ = allocator;
+    const trigger_to = folder.trigger_to orelse return;
+
+    if (folder.trigger_from) |trigger_from| {
+        std.debug.print("[{s}] Copying trigger file: {s} -> {s}\n", .{ folder.local_dir, trigger_from, trigger_to });
+        ssh.uploadFile(trigger_from, trigger_to, config.simple_log) catch |err| {
+            std.debug.print("Warning: Failed to copy trigger file: {s}\n", .{@errorName(err)});
+        };
+    } else {
+        std.debug.print("[{s}] Writing empty trigger file: {s}\n", .{ folder.local_dir, trigger_to });
+        ssh.uploadBuffer(&[_]u8{}, trigger_to, config.simple_log) catch |err| {
+            std.debug.print("Warning: Failed to write empty trigger file: {s}\n", .{@errorName(err)});
+        };
+    }
 }
 
 pub fn saveDatabase(

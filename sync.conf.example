@@ -49,6 +49,12 @@ local_dir=./docs
 remote_dir=/opt/project/docs
 excludes=**/*.bak, .~*
 
+# After each sync, copy this local file to a remote destination.
+# If trigger_from is not defined, an empty file is created at trigger_to.
+# Used for triggering remote actions/scripts.
+# trigger_from=./trigger.local
+# trigger_to=/tmp/sync-trigger.txt
+
 # === Local-only copy workers (no SSH) ===
 # [local-folder] serves as a target directory and expects one or more [source] entries.
 

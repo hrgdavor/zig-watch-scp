@@ -14,11 +14,9 @@ pub const ChangeKind = enum {
     deleted,
 };
 
-pub const Watcher = if (builtin.os.tag == .linux)
-    @import("watcher_linux.zig").LinuxWatcher
-else if (builtin.os.tag == .windows)
-    @import("watcher_windows.zig").WindowsWatcher
-else if (builtin.os.tag == .macos)
-    @import("watcher_macos.zig").MacOsWatcher
-else
-    @compileError("Unsupported platform for file watching");
+pub const Watcher = switch (builtin.os.tag) {
+    .linux => @import("watcher_linux.zig").LinuxWatcher,
+    .windows => @import("watcher_windows.zig").WindowsWatcher,
+    .macos => @import("watcher_macos.zig").MacOsWatcher,
+    else => @compileError("Unsupported platform for file watching"),
+};

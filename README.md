@@ -18,6 +18,7 @@ A cross-platform file synchronization tool written in Zig 0.15 that uses SSH/SCP
   - macOS: FSEvents
 - **Granular Pattern Matching**: Individual include/exclude patterns for each folder pair
 - **Remote Cleanup**: Optional `--cleanup` flag to remove files on the remote server that are not present locally (respects include/exclude patterns)
+- **Sync Trigger**: Copy a specific local file to the remote (or create an empty one) after each synchronization. Useful for triggering remote scripts or CI/CD pipelines in restricted environments.
 
 ## Usage
 
@@ -148,6 +149,23 @@ The tool automatically checks your `~/.ssh/config` (or `%USERPROFILE%\.ssh\confi
 - **IdentityFile**: Path to your private key (supports `~` expansion)
 
 Explicit settings in `sync.conf` or CLI arguments always take precedence over values found in your SSH config.
+
+### Sync Trigger
+
+A "Sync Trigger" allows you to copy a specific local file (or create an empty one) to the remote server after every synchronization event (both initial and on-change). This is useful for triggering remote scripts, reloaders, or CI/CD pipelines that monitor a specific "signal" file.
+
+**Configuration**:
+```ini
+[folder]
+local_dir=./src
+remote_dir=/opt/app/src
+# (Optional) Local file to copy to the remote
+trigger_from=./trigger.signal
+# (Required) Remote path where the trigger file will be written
+trigger_to=/tmp/app-reload.trigger
+```
+
+If `trigger_from` is not specified, an empty file will be created at `trigger_to` on the remote server.
 
 ## Glob Patterns
 

@@ -224,6 +224,8 @@ fn handleCreateDb(allocator: std.mem.Allocator, config: *const Config, folder_pa
         .remote_dir = ".",
         .include_patterns = config.create_includes,
         .exclude_patterns = config.create_excludes,
+        .trigger_from = null,
+        .trigger_to = null,
     };
 
     // Scan directory
