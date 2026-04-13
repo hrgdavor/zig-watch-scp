@@ -323,7 +323,7 @@ pub const SshSession = struct {
             remote_path_z.ptr,
             @intCast(remote_path.len),
             c.LIBSSH2_FXF_WRITE | c.LIBSSH2_FXF_CREAT | c.LIBSSH2_FXF_TRUNC,
-            @as(c_int, @intCast(c.LIBSSH2_SFTP_S_IRUSR | c.LIBSSH2_SFTP_S_IWUSR | c.LIBSSH2_SFTP_S_IRGRP | c.LIBSSH2_SFTP_S_IROTH)),
+            0,
             c.LIBSSH2_SFTP_OPENFILE,
         ) orelse {
             const err_code = c.libssh2_sftp_last_error(sftp);
@@ -507,7 +507,7 @@ pub const SshSession = struct {
                 sftp,
                 path_z.ptr,
                 @intCast(path_z.len),
-                @as(c_int, @intCast(c.LIBSSH2_SFTP_S_IRWXU | c.LIBSSH2_SFTP_S_IRGRP | c.LIBSSH2_SFTP_S_IXGRP | c.LIBSSH2_SFTP_S_IROTH | c.LIBSSH2_SFTP_S_IXOTH)),
+                0,
             );
         }
     }

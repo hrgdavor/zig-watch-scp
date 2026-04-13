@@ -167,6 +167,17 @@ trigger_to=/tmp/app-reload.trigger
 
 If `trigger_from` is not specified, an empty file will be created at `trigger_to` on the remote server.
 
+### Remote Permissions and ACL Support
+
+The tool uses **neutral SFTP permissions** (mode `0`) when creating files and directories on the remote server. 
+
+This behavior is intentional and provides several benefits:
+- **ACL Compatibility**: Specifically required when using POSIX ACLs (`setfacl`). Explicitly setting a mode (like `0644`) can override the ACL "mask" on many SFTP servers, effectively capping the permissions granted by other ACL entries.
+- **Shared Group Folders**: Allows you to upload files to directories owned by other users where you have group write access.
+- **Server Defaults**: Relies on the remote server's `umask` and default directory ACLs to apply the correct permissions, rather than forcing a hardcoded local preference.
+
+Additionally, the tool avoids making `sftp_setstat` or `sftp_fsetstat` calls, which ensures that it doesn't try to change ownership or permissions on files it doesn't own.
+
 ## Glob Patterns
 
 The tool supports modern glob patterns for both `includes` and `excludes`:
