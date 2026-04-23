@@ -8,6 +8,8 @@ pub const Watcher = @import("watcher.zig").Watcher;
 const Scanner = @import("scanner.zig").Scanner;
 const ChecksumDb = @import("checksum_db.zig").ChecksumDb;
 const checksum_utils = @import("checksum_db.zig");
+const ANSI_YELLOW = "\x1b[33m";
+const ANSI_RESET = "\x1b[0m";
 
 pub const LocalSourceSync = struct {
     source: *const LocalSource,
@@ -142,7 +144,11 @@ pub const LocalCopyWorker = struct {
 
         // Copy file
         try std.Io.Dir.cwd().copyFile(full_source, std.Io.Dir.cwd(), full_dest, self.io, .{});
-        std.debug.print("  Copied: {s}\n", .{rel_path});
+        if (self.config.color) {
+            std.debug.print(ANSI_YELLOW ++ "  Copied: {s}" ++ ANSI_RESET ++ "\n", .{rel_path});
+        } else {
+            std.debug.print("  Copied: {s}\n", .{rel_path});
+        }
     }
 };
 
@@ -213,18 +219,30 @@ pub fn watchLocalCopyThread(lw: *LocalCopyWorker) void {
                     var rel_path = combined_path[ss.source.local_dir.len..];
                     if (rel_path.len > 0 and (rel_path[0] == '/' or rel_path[0] == '\\')) rel_path = rel_path[1..];
 
+                    // Check if actually a file and get mtime
+                    const stat = std.Io.Dir.cwd().statFile(lw.io, combined_path, .{}) catch |err| {
+                        if (err != error.FileNotFound) {
+                            std.debug.print("Error stating file {s}: {}\n", .{ rel_path, err });
+                        }
+                        break;
+                    };
+                    if (stat.kind == .directory) {
+                        const full_dest = std.fs.path.join(allocator, &[_][]const u8{ lw.lw_config.dest_dir, rel_path }) catch break;
+                        defer allocator.free(full_dest);
+                        std.Io.Dir.cwd().createDirPath(lw.io, full_dest) catch |err| {
+                            std.debug.print("Error creating directory {s}: {}\n", .{ full_dest, err });
+                        };
+                        break;
+                    }
+
+                    const mtime: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_ms));
+
                     // Check hash before copying
                     const is_text = checksum_utils.isTextFile(rel_path, config.text_extensions);
                     const hash = checksum_utils.calculateFileChecksum(allocator, lw.io, combined_path, is_text) catch |err| {
                         std.debug.print("Error calculating hash for {s}: {}\n", .{ rel_path, err });
                         break;
                     };
-
-                    const stat = std.Io.Dir.cwd().statFile(lw.io, combined_path, .{}) catch |err| {
-                        std.debug.print("Error stating file {s}: {}\n", .{ rel_path, err });
-                        break;
-                    };
-                    const mtime: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_ms));
 
                     const full_dest = std.fs.path.join(allocator, &[_][]const u8{ lw.lw_config.dest_dir, rel_path }) catch |err| {
                         std.debug.print("Error joining path for {s}: {}\n", .{ rel_path, err });

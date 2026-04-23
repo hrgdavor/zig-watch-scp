@@ -40,6 +40,7 @@ pub const Config = struct {
     local_copy_workers: []LocalCopyWorkerConfig,
     exec_cmd: ?[]const u8,
     watch: bool,
+    color: bool,
 
     // Standalone create mode
     create_folder: ?[]const u8,
@@ -71,6 +72,7 @@ pub const Config = struct {
         var cli_watch_delay: ?u64 = null;
         var cli_exec_cmd: ?[]const u8 = null;
         var cli_watch: bool = false;
+        var cli_color: bool = true;
         var config_path: ?[]const u8 = null;
         var cli_host: ?[]const u8 = null;
         var cli_username: ?[]const u8 = null;
@@ -143,6 +145,8 @@ pub const Config = struct {
                 config_path = raw_args[i];
             } else if (std.mem.eql(u8, arg, "-x") or std.mem.eql(u8, arg, "--compress")) {
                 cli_compress = true;
+            } else if (std.mem.eql(u8, arg, "--no-color")) {
+                cli_color = false;
             } else if (std.mem.eql(u8, arg, "-w") or std.mem.eql(u8, arg, "--watch")) {
                 cli_watch = true;
             } else if (std.mem.eql(u8, arg, "--simple-log")) {
@@ -224,6 +228,7 @@ pub const Config = struct {
             .simple_log = cli_simple_log,
             .cleanup = cli_cleanup,
             .watch = cli_watch,
+            .color = cli_color,
             .exec_cmd = if (cli_exec_cmd) |cmd| try arena_allocator.dupe(u8, cmd) else null,
             .text_extensions = try createDefaultTextExtensions(arena_allocator),
             .folders = try arena_allocator.alloc(Folder, 0),
@@ -288,6 +293,7 @@ pub const Config = struct {
             \\      --watch-delay <ms>    Delay before syncing after change (default: 200)
             \\      --exec <cmd>          Remote command to run after sync
             \\  -w, --watch               Enable watch mode (continuous sync)
+            \\      --no-color            Disable color output
             \\  -h, --help               Show this help
             \\
         , .{});

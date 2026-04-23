@@ -9,6 +9,8 @@ const Scanner = @import("scanner.zig").Scanner;
 const FileEntry = @import("scanner.zig").FileEntry;
 pub const Watcher = @import("watcher.zig").Watcher;
 const checksum_db = @import("checksum_db.zig");
+const ANSI_YELLOW = "\x1b[33m";
+const ANSI_RESET = "\x1b[0m";
 
 pub var ssh_mutex = std.Io.Mutex.init;
 
@@ -58,7 +60,11 @@ pub fn performInitialSync(
             std.debug.print("[{}/{}] Syncing: {s}\n", .{ i, changed_files.items.len, entry.path });
             try syncFile(allocator, config, folder, ssh, entry.path);
             try remote_db.put(entry.path, entry.checksum, entry.mtime);
-            std.debug.print("[{}/{}] Synced: {s}\n", .{ i, changed_files.items.len, entry.path });
+            if (config.color) {
+                std.debug.print(ANSI_YELLOW ++ "[{}/{}] Synced: {s}" ++ ANSI_RESET ++ "\n", .{ i, changed_files.items.len, entry.path });
+            } else {
+                std.debug.print("[{}/{}] Synced: {s}\n", .{ i, changed_files.items.len, entry.path });
+            }
         }
     } else {
         // Multi-threaded mode
@@ -239,7 +245,11 @@ pub fn uploadWorker(ctx: *WorkContext) void {
         const total = ctx.total;
         ctx.mutex.unlock(ctx.io);
 
-        std.debug.print("[{}/{}] Synced: {s}\n", .{ completed, total, entry.path });
+        if (ctx.config.color) {
+            std.debug.print(ANSI_YELLOW ++ "[{}/{}] Synced: {s}" ++ ANSI_RESET ++ "\n", .{ completed, total, entry.path });
+        } else {
+            std.debug.print("[{}/{}] Synced: {s}\n", .{ completed, total, entry.path });
+        }
     }
 }
 
@@ -361,7 +371,17 @@ pub fn processReadySync(
 
     // Check if actually a file and get mtime
     const stat = std.Io.Dir.cwd().statFile(io, local_path, .{}) catch return;
-    if (stat.kind == .directory) return;
+    if (stat.kind == .directory) {
+        var normalized_rel = try allocator.dupe(u8, rel_path);
+        defer allocator.free(normalized_rel);
+        std.mem.replaceScalar(u8, normalized_rel, '\\', '/');
+        if (normalized_rel.len > 0 and normalized_rel[0] == '/') {
+            try ssh.createRemoteDir(normalized_rel[1..]);
+        } else {
+            try ssh.createRemoteDir(normalized_rel);
+        }
+        return;
+    }
     const mtime: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_ms));
 
     const is_text = checksum_db.isTextFile(rel_path, config.text_extensions);
@@ -394,7 +414,11 @@ pub fn processReadySync(
 
     try performSyncTrigger(allocator, config, fs.folder, ssh);
 
-    std.debug.print("[{s}] Synced: {s}\n\n", .{ fs.folder.local_dir, rel_path });
+    if (config.color) {
+        std.debug.print(ANSI_YELLOW ++ "[{s}] Synced: {s}" ++ ANSI_RESET ++ "\n\n", .{ fs.folder.local_dir, rel_path });
+    } else {
+        std.debug.print("[{s}] Synced: {s}\n\n", .{ fs.folder.local_dir, rel_path });
+    }
 }
 
 pub fn shouldSyncFile(path: []const u8, folder: *const Folder) bool {
@@ -456,6 +480,7 @@ pub fn saveDatabase(
         defer allocator.free(full_path);
 
         std.debug.print("[{s}] Saving database locally to {s}...\n", .{ folder.local_dir, full_path });
+        std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(full_path) orelse ".") catch {};
         const file = try std.Io.Dir.cwd().createFile(io, full_path, .{});
         defer file.close(io);
         var write_buf: [4096]u8 = undefined;
