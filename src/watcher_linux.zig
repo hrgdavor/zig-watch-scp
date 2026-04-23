@@ -45,7 +45,7 @@ pub const LinuxWatcher = struct {
     fn addWatchRecursive(self: *LinuxWatcher, path: []const u8) !void {
         try self.addWatch(path);
 
-        const dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch return;
+        const dir = std.Io.Dir.cwd().openDir(path, .{ .iterate = true }) catch return;
         var dir_copy = dir;
         defer dir_copy.close();
 
@@ -106,7 +106,7 @@ pub const LinuxWatcher = struct {
             else
                 full_path;
 
-            const rel_path_trimmed = std.mem.trimLeft(u8, rel_path, "/\\");
+            const rel_path_trimmed = std.mem.trimStart(u8, rel_path, "/\\");
             const owned_rel_path = try self.allocator.dupe(u8, rel_path_trimmed);
 
             const kind: watcher.ChangeKind = if (event.mask & c.IN_CREATE != 0 or event.mask & c.IN_MOVED_TO != 0)

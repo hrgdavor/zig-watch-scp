@@ -4,6 +4,39 @@ const std = @import("std");
 const watcher = @import("watcher.zig");
 const windows = std.os.windows;
 
+// Windows constants removed from std.os.windows in Zig 0.16
+const FILE_LIST_DIRECTORY: u32 = 0x00000001;
+const FILE_SHARE_READ: u32 = 0x00000001;
+const FILE_SHARE_WRITE: u32 = 0x00000002;
+const FILE_SHARE_DELETE: u32 = 0x00000004;
+const OPEN_EXISTING: u32 = 3;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
+const FILE_FLAG_OVERLAPPED: u32 = 0x40000000;
+
+/// OVERLAPPED is no longer in std.os.windows in Zig 0.16; define it locally.
+const OVERLAPPED = extern struct {
+    Internal: usize = 0,
+    InternalHigh: usize = 0,
+    DUMMYUNIONNAME: extern union {
+        DUMMYSTRUCTNAME: extern struct {
+            Offset: u32,
+            OffsetHigh: u32,
+        },
+        Pointer: ?*anyopaque,
+    } = .{ .DUMMYSTRUCTNAME = .{ .Offset = 0, .OffsetHigh = 0 } },
+    hEvent: ?windows.HANDLE = null,
+};
+
+extern "kernel32" fn CreateFileW(
+    lpFileName: windows.LPCWSTR,
+    dwDesiredAccess: u32,
+    dwShareMode: u32,
+    lpSecurityAttributes: ?*anyopaque,
+    dwCreationDisposition: u32,
+    dwFlagsAndAttributes: u32,
+    hTemplateFile: ?windows.HANDLE,
+) callconv(.winapi) ?windows.HANDLE;
+
 const FILE_NOTIFY_INFORMATION = extern struct {
     NextEntryOffset: u32,
     Action: u32,
@@ -31,13 +64,13 @@ extern "kernel32" fn ReadDirectoryChangesW(
     bWatchSubtree: windows.BOOL,
     dwNotifyFilter: u32,
     lpBytesReturned: ?*u32,
-    lpOverlapped: ?*windows.OVERLAPPED,
+    lpOverlapped: ?*OVERLAPPED,
     lpCompletionRoutine: ?*const anyopaque,
 ) callconv(.winapi) windows.BOOL;
 
 extern "kernel32" fn GetOverlappedResult(
     hUint: windows.HANDLE,
-    lpOverlapped: *windows.OVERLAPPED,
+    lpOverlapped: *OVERLAPPED,
     lpNumberOfBytesTransferred: *u32,
     bWait: windows.BOOL,
 ) callconv(.winapi) windows.BOOL;
@@ -61,30 +94,29 @@ pub const WindowsWatcher = struct {
     base_path: []const u8,
     bytes_returned: u32,
     current_offset: usize,
-    overlapped: windows.OVERLAPPED,
+    overlapped: OVERLAPPED,
     io_pending: bool,
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !WindowsWatcher {
         const path_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, path);
         defer allocator.free(path_w);
 
-        const dir_handle = windows.kernel32.CreateFileW(
+        const dir_handle = CreateFileW(
             path_w.ptr,
-            windows.FILE_LIST_DIRECTORY,
-            windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
+            FILE_LIST_DIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             null,
-            windows.OPEN_EXISTING,
-            windows.FILE_FLAG_BACKUP_SEMANTICS | windows.FILE_FLAG_OVERLAPPED,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
             null,
-        );
-        if (dir_handle == windows.INVALID_HANDLE_VALUE) {
+        ) orelse {
             return error.OpenDirectoryFailed;
-        }
+        };
 
         const buffer = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(@alignOf(FILE_NOTIFY_INFORMATION)), 64 * 1024);
 
-        // Auto-reset event (bManualReset = windows.FALSE)
-        const event_handle = CreateEventW(null, windows.FALSE, windows.FALSE, null) orelse {
+        // Auto-reset event (bManualReset = windows.BOOL.FALSE)
+        const event_handle = CreateEventW(null, windows.BOOL.FALSE, windows.BOOL.FALSE, null) orelse {
             windows.CloseHandle(dir_handle);
             allocator.free(buffer);
             return error.CreateEventFailed;
@@ -97,7 +129,7 @@ pub const WindowsWatcher = struct {
             .base_path = try allocator.dupe(u8, path),
             .bytes_returned = 0,
             .current_offset = 0,
-            .overlapped = std.mem.zeroInit(windows.OVERLAPPED, .{ .hEvent = event_handle }),
+            .overlapped = std.mem.zeroInit(OVERLAPPED, .{ .hEvent = event_handle }),
             .io_pending = false,
         };
     }
@@ -125,15 +157,15 @@ pub const WindowsWatcher = struct {
             self.dir_handle,
             self.buffer.ptr,
             @intCast(self.buffer.len),
-            windows.TRUE, // watch subtree
+            windows.BOOL.TRUE, // watch subtree
             filter,
             null,
             &self.overlapped,
             null,
         );
 
-        if (result == 0) {
-            const err = windows.kernel32.GetLastError();
+        if (!result.toBool()) {
+            const err = windows.GetLastError();
             if (err != .IO_PENDING) {
                 std.debug.print("ReadDirectoryChangesW failed: {}\n", .{err});
                 return error.ReadDirectoryChangesFailed;
@@ -155,8 +187,8 @@ pub const WindowsWatcher = struct {
 
         // Check if I/O has completed
         var transferred: u32 = 0;
-        if (GetOverlappedResult(self.dir_handle, &self.overlapped, &transferred, windows.FALSE) == 0) {
-            const err = windows.kernel32.GetLastError();
+        if (!GetOverlappedResult(self.dir_handle, &self.overlapped, &transferred, windows.BOOL.FALSE).toBool()) {
+            const err = windows.GetLastError();
             if (err == .IO_INCOMPLETE) {
                 return null;
             }

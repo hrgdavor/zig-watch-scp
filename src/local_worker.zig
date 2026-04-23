@@ -29,12 +29,13 @@ pub const LocalSourceSync = struct {
 
 pub const LocalCopyWorker = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: *const Config,
     lw_config: *const LocalCopyWorkerConfig,
     source_syncs: []LocalSourceSync,
     checksum_db: ChecksumDb,
 
-    pub fn init(allocator: std.mem.Allocator, config: *const Config, lw_config: *const LocalCopyWorkerConfig) !LocalCopyWorker {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: *const Config, lw_config: *const LocalCopyWorkerConfig) !LocalCopyWorker {
         var sources = try allocator.alloc(LocalSourceSync, lw_config.sources.len);
         errdefer allocator.free(sources);
 
@@ -44,6 +45,7 @@ pub const LocalCopyWorker = struct {
 
         return .{
             .allocator = allocator,
+            .io = io,
             .config = config,
             .lw_config = lw_config,
             .source_syncs = sources,
@@ -61,20 +63,18 @@ pub const LocalCopyWorker = struct {
         std.debug.print("LocalCopyWorker: Initial sync to {s}\n", .{self.lw_config.dest_dir});
 
         // Ensure destination exists
-        std.fs.cwd().makePath(self.lw_config.dest_dir) catch |err| {
-            if (err != error.PathAlreadyExists) return err;
-        };
+        try std.Io.Dir.cwd().createDirPath(self.io, self.lw_config.dest_dir);
 
         for (self.lw_config.sources) |*source| {
             std.debug.print("  Source: {s}\n", .{source.local_dir});
 
-            var iter_dir = try std.fs.cwd().openDir(source.local_dir, .{ .iterate = true });
-            defer iter_dir.close();
+            var iter_dir = try std.Io.Dir.cwd().openDir(self.io, source.local_dir, .{ .iterate = true });
+            defer iter_dir.close(self.io);
 
             var walker = try iter_dir.walk(self.allocator);
             defer walker.deinit();
 
-            while (try walker.next()) |entry| {
+            while (try walker.next(self.io)) |entry| {
                 if (entry.kind != .file) continue;
 
                 if (self.shouldCopyFile(entry.path, source)) {
@@ -82,10 +82,10 @@ pub const LocalCopyWorker = struct {
                     defer self.allocator.free(full_source);
 
                     const is_text = checksum_utils.isTextFile(entry.path, self.config.text_extensions);
-                    const hash = try checksum_utils.calculateFileChecksum(self.allocator, full_source, is_text);
+                    const hash = try checksum_utils.calculateFileChecksum(self.allocator, self.io, full_source, is_text);
 
-                    const stat = try std.fs.cwd().statFile(full_source);
-                    const mtime: i64 = @intCast(@divTrunc(stat.mtime, std.time.ns_per_ms));
+                    const stat = try std.Io.Dir.cwd().statFile(self.io, full_source, .{});
+                    const mtime: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_ms));
 
                     const full_dest = try std.fs.path.join(self.allocator, &[_][]const u8{ self.lw_config.dest_dir, entry.path });
                     defer self.allocator.free(full_dest);
@@ -97,9 +97,9 @@ pub const LocalCopyWorker = struct {
 
                     if (!skip) {
                         // Check if file already exists in destination and has same hash
-                        if (std.fs.cwd().statFile(full_dest)) |dest_stat| {
+                        if (std.Io.Dir.cwd().statFile(self.io, full_dest, .{})) |dest_stat| {
                             if (dest_stat.size == stat.size) {
-                                const dest_hash = checksum_utils.calculateFileChecksum(self.allocator, full_dest, is_text) catch 0;
+                                const dest_hash = checksum_utils.calculateFileChecksum(self.allocator, self.io, full_dest, is_text) catch 0;
                                 if (dest_hash == hash) skip = true;
                             }
                         } else |_| {}
@@ -137,13 +137,11 @@ pub const LocalCopyWorker = struct {
 
         // Ensure dest parent dir exists
         if (std.fs.path.dirname(full_dest)) |parent| {
-            std.fs.cwd().makePath(parent) catch |err| {
-                if (err != error.PathAlreadyExists) return err;
-            };
+            try std.Io.Dir.cwd().createDirPath(self.io, parent);
         }
 
         // Copy file
-        try std.fs.cwd().copyFile(full_source, std.fs.cwd(), full_dest, .{});
+        try std.Io.Dir.cwd().copyFile(full_source, std.Io.Dir.cwd(), full_dest, self.io, .{});
         std.debug.print("  Copied: {s}\n", .{rel_path});
     }
 };
@@ -179,7 +177,7 @@ pub fn watchLocalCopyThread(lw: *LocalCopyWorker) void {
                 if (event.kind == .created or event.kind == .modified) {
                     if (!lw.shouldCopyFile(event.path, ss.source)) continue;
 
-                    const target_time = std.time.milliTimestamp() + @as(i64, @intCast(config.watch_delay_ms));
+                    const target_time = @as(i64, @intCast(@divTrunc(std.Io.Timestamp.now(lw.io, .real).nanoseconds, std.time.ns_per_ms))) + @as(i64, @intCast(config.watch_delay_ms));
 
                     // Store both source_dir and rel_path to know where it came from
                     const combined_key = std.fs.path.join(allocator, &[_][]const u8{ ss.source.local_dir, event.path }) catch continue;
@@ -197,7 +195,7 @@ pub fn watchLocalCopyThread(lw: *LocalCopyWorker) void {
         }
 
         // Check for ready syncs
-        const now = std.time.milliTimestamp();
+        const now = @as(i64, @intCast(@divTrunc(std.Io.Timestamp.now(lw.io, .real).nanoseconds, std.time.ns_per_ms)));
         var it = pending_syncs.iterator();
         while (it.next()) |entry| {
             if (now >= entry.value_ptr.*) {
@@ -217,16 +215,16 @@ pub fn watchLocalCopyThread(lw: *LocalCopyWorker) void {
 
                     // Check hash before copying
                     const is_text = checksum_utils.isTextFile(rel_path, config.text_extensions);
-                    const hash = checksum_utils.calculateFileChecksum(allocator, combined_path, is_text) catch |err| {
+                    const hash = checksum_utils.calculateFileChecksum(allocator, lw.io, combined_path, is_text) catch |err| {
                         std.debug.print("Error calculating hash for {s}: {}\n", .{ rel_path, err });
                         break;
                     };
 
-                    const stat = std.fs.cwd().statFile(combined_path) catch |err| {
+                    const stat = std.Io.Dir.cwd().statFile(lw.io, combined_path, .{}) catch |err| {
                         std.debug.print("Error stating file {s}: {}\n", .{ rel_path, err });
                         break;
                     };
-                    const mtime: i64 = @intCast(@divTrunc(stat.mtime, std.time.ns_per_ms));
+                    const mtime: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_ms));
 
                     const full_dest = std.fs.path.join(allocator, &[_][]const u8{ lw.lw_config.dest_dir, rel_path }) catch |err| {
                         std.debug.print("Error joining path for {s}: {}\n", .{ rel_path, err });
@@ -243,9 +241,9 @@ pub fn watchLocalCopyThread(lw: *LocalCopyWorker) void {
 
                     if (!skip) {
                         // Check if file already exists in destination and has same hash
-                        if (std.fs.cwd().statFile(full_dest)) |dest_stat| {
+                        if (std.Io.Dir.cwd().statFile(lw.io, full_dest, .{})) |dest_stat| {
                             if (dest_stat.size == stat.size) {
-                                const dest_hash = checksum_utils.calculateFileChecksum(allocator, full_dest, is_text) catch 0;
+                                const dest_hash = checksum_utils.calculateFileChecksum(allocator, lw.io, full_dest, is_text) catch 0;
                                 if (dest_hash == hash) skip = true;
                             }
                         } else |_| {}
@@ -265,6 +263,6 @@ pub fn watchLocalCopyThread(lw: *LocalCopyWorker) void {
         }
         ready_paths.clearRetainingCapacity();
 
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        lw.io.sleep(.{ .nanoseconds = 50 * std.time.ns_per_ms }, .real) catch {};
     }
 }

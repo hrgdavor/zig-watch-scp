@@ -1,26 +1,48 @@
 // SPDX-License-Identifier: LicenseRef-GPL-3.0-with-Commons-Clause
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @cImport({
     @cDefine("LIBSSH2_STATIC", "1");
+    // Prevent MinGW from enabling fortified (bounds-checking) inline wrappers for wcscat/wcscpy.
+    // These wrappers embed a local `extern wcscat_s` declaration that Zig translate-c emits
+    // as an unused local constant — an error in Zig 0.16.
+    @cUndef("_FORTIFY_SOURCE");
+    @cDefine("_FORTIFY_SOURCE", "0");
+    // Suppress GCC-only builtins that Zig's clang C translator does not understand.
+    // These appear in mingw's io.h when __USE_MINGW_ANSI_STDIO is active.
+    @cDefine("__builtin_va_arg_pack_len()", "0");
+    @cDefine("__builtin_va_arg_pack()", "");
     @cInclude("libssh2.h");
     @cInclude("libssh2_sftp.h");
+    @cInclude("socket_compat.h");
 });
 
 pub const SshSession = struct {
     session: *c.LIBSSH2_SESSION,
-    sock: std.posix.socket_t,
+    sock: c.libssh2_socket_t,
     allocator: std.mem.Allocator,
+    io: std.Io,
     sftp: ?*c.LIBSSH2_SFTP,
 
     pub fn libInit() !void {
+        if (builtin.os.tag == .windows) {
+            var wsaData: c.WSADATA = undefined;
+            if (c.WSAStartup(0x0202, &wsaData) != 0) {
+                return error.LibsshInitFailed;
+            }
+        }
         if (c.libssh2_init(0) != 0) {
+            if (builtin.os.tag == .windows) _ = c.WSACleanup();
             return error.LibsshInitFailed;
         }
     }
 
     pub fn libExit() void {
         c.libssh2_exit();
+        if (builtin.os.tag == .windows) {
+            _ = c.WSACleanup();
+        }
     }
 
     pub fn printLastError(session: *c.LIBSSH2_SESSION, prefix: []const u8) void {
@@ -34,8 +56,18 @@ pub const SshSession = struct {
         }
     }
 
+    /// Close a raw socket, platform-appropriate.
+    fn closeSock(sock: c.libssh2_socket_t) void {
+        if (builtin.os.tag == .windows) {
+            _ = c.closesocket(sock);
+        } else {
+            _ = c.close(sock);
+        }
+    }
+
     pub fn init(
         allocator: std.mem.Allocator,
+        io: std.Io,
         host: []const u8,
         username: []const u8,
         password: []const u8,
@@ -56,20 +88,36 @@ pub const SshSession = struct {
             port = try std.fmt.parseInt(u16, host[colon_pos + 1 ..], 10);
         }
 
-        // Create socket
-        const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
-        errdefer std.posix.close(sock);
+        // Null-terminate host and port strings for getaddrinfo
+        const host_z = try allocator.dupeZ(u8, host_str);
+        defer allocator.free(host_z);
+        var port_buf: [8]u8 = undefined;
+        const port_s = try std.fmt.bufPrintZ(&port_buf, "{}", .{port});
 
-        // Resolve hostname
-        const addr_list = try std.net.getAddressList(allocator, host_str, port);
-        defer addr_list.deinit();
-
-        if (addr_list.addrs.len == 0) {
+        // Resolve hostname and create TCP socket via C getaddrinfo
+        var hints = std.mem.zeroes(c.addrinfo);
+        hints.ai_family = c.AF_INET;
+        hints.ai_socktype = c.SOCK_STREAM;
+        var res: [*c]c.addrinfo = null;
+        if (c.getaddrinfo(host_z.ptr, port_s.ptr, &hints, &res) != 0) {
             return error.HostNotFound;
         }
+        defer c.freeaddrinfo(res);
+
+        const first = res orelse return error.HostNotFound;
+        const sock = c.socket(first.*.ai_family, first.*.ai_socktype, first.*.ai_protocol);
+        // Check for invalid socket (INVALID_SOCKET on Windows, -1 on POSIX)
+        const invalid: c.libssh2_socket_t = if (builtin.os.tag == .windows)
+            @bitCast(~@as(usize, 0))
+        else
+            @as(c_int, -1);
+        if (sock == invalid) return error.SocketCreationFailed;
+        errdefer closeSock(sock);
 
         // Connect
-        try std.posix.connect(sock, &addr_list.addrs[0].any, addr_list.addrs[0].getOsSockLen());
+        if (c.connect(sock, first.*.ai_addr, @intCast(first.*.ai_addrlen)) != 0) {
+            return error.ConnectionFailed;
+        }
 
         // Create SSH session
         const session = c.libssh2_session_init_ex(null, null, null, null) orelse return error.SessionInitFailed;
@@ -78,13 +126,8 @@ pub const SshSession = struct {
         // Set blocking mode
         c.libssh2_session_set_blocking(session, 1);
 
-        // Perform handshake
-        const lib_sock: c.libssh2_socket_t = if (@import("builtin").os.tag == .windows)
-            @intCast(@intFromPtr(sock))
-        else
-            @intCast(sock);
-
-        if (c.libssh2_session_handshake(session, lib_sock) != 0) {
+        // Perform handshake (sock is already c.libssh2_socket_t)
+        if (c.libssh2_session_handshake(session, sock) != 0) {
             printLastError(session, "Handshake failed");
             return error.HandshakeFailed;
         }
@@ -121,7 +164,7 @@ pub const SshSession = struct {
             std.debug.print("Trying Key File authentication for user '{s}' with key '{s}'\n", .{ username, key_path_z });
 
             // Verify file accessibility
-            std.fs.accessAbsolute(key_path_z, .{}) catch |err| {
+            std.Io.Dir.accessAbsolute(io, key_path_z, .{}) catch |err| {
                 std.debug.print("Error: Cannot access private key file {s}: {s}\n", .{ key_path_z, @errorName(err) });
                 return error.KeyReadFailed;
             };
@@ -131,9 +174,9 @@ pub const SshSession = struct {
             var pub_key_content: ?[]u8 = null;
             const pub_key_path = try std.fmt.allocPrint(allocator, "{s}.pub", .{key_path_z});
             defer allocator.free(pub_key_path);
-            if (std.fs.accessAbsolute(pub_key_path, .{})) |_| {
+            if (std.Io.Dir.accessAbsolute(io, pub_key_path, .{})) |_| {
                 pub_key_path_z = try allocator.dupeZ(u8, pub_key_path);
-                pub_key_content = std.fs.cwd().readFileAlloc(allocator, pub_key_path, 4096) catch null;
+                pub_key_content = std.Io.Dir.cwd().readFileAlloc(io, pub_key_path, allocator, @as(std.Io.Limit, @enumFromInt(4096))) catch null;
                 if (pub_key_content) |_| {
                     std.debug.print("Found and read public key file: {s}\n", .{pub_key_path});
                 }
@@ -164,7 +207,7 @@ pub const SshSession = struct {
 
                 // Try frommemory as fallback
                 std.debug.print("Trying public key authentication (frommemory)...\n", .{});
-                const priv_key_raw = std.fs.cwd().readFileAlloc(allocator, key_path_z, 1024 * 1024) catch |err| {
+                const priv_key_raw = std.Io.Dir.cwd().readFileAlloc(io, key_path_z, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024))) catch |err| {
                     std.debug.print("Error reading private key file: {s}\n", .{@errorName(err)});
                     return error.KeyReadFailed;
                 };
@@ -188,6 +231,7 @@ pub const SshSession = struct {
                     .session = session,
                     .sock = sock,
                     .allocator = allocator,
+                    .io = io,
                     .sftp = null,
                 };
             } else {
@@ -212,6 +256,7 @@ pub const SshSession = struct {
                             .session = session,
                             .sock = sock,
                             .allocator = allocator,
+                            .io = io,
                             .sftp = null,
                         };
                     } else {
@@ -242,6 +287,7 @@ pub const SshSession = struct {
             .session = session,
             .sock = sock,
             .allocator = allocator,
+            .io = io,
             .sftp = null,
         };
     }
@@ -253,7 +299,7 @@ pub const SshSession = struct {
         }
         _ = c.libssh2_session_disconnect(self.session, "Finished");
         _ = c.libssh2_session_free(self.session);
-        std.posix.close(self.sock);
+        closeSock(self.sock);
         // Note: libssh2_exit should be called once at the end of main()
         // c.libssh2_exit();
     }
@@ -282,8 +328,11 @@ pub const SshSession = struct {
         ) orelse return error.RemoteFileOpenFailed;
         defer _ = c.libssh2_sftp_close(remote_file);
 
-        const local_file = try std.fs.cwd().createFile(local_path, .{});
-        defer local_file.close();
+        const local_file = try std.Io.Dir.cwd().createFile(self.io, local_path, .{});
+        defer local_file.close(self.io);
+
+        var write_buf: [8192]u8 = undefined;
+        var local_writer = local_file.writer(self.io, &write_buf);
 
         var buffer: [8192]u8 = undefined;
         while (true) {
@@ -293,26 +342,54 @@ pub const SshSession = struct {
             }
             if (bytes_read == 0) break;
 
-            try local_file.writeAll(buffer[0..@intCast(bytes_read)]);
+            try local_writer.interface.writeAll(buffer[0..@intCast(bytes_read)]);
         }
+        try local_writer.interface.flush();
     }
 
     /// Upload a file to remote server
     pub fn uploadFile(self: *SshSession, local_path: []const u8, remote_path: []const u8, simple_log: bool) !void {
-        const local_file = try std.fs.cwd().openFile(local_path, .{});
-        defer local_file.close();
+        const stat = try std.Io.Dir.cwd().statFile(self.io, local_path, .{});
+        const size = stat.size;
+        const local_file = try std.Io.Dir.cwd().openFile(self.io, local_path, .{});
+        defer local_file.close(self.io);
 
-        const stat = try local_file.stat();
-        return self.uploadInternal(local_file.deprecatedReader(), stat.size, remote_path, simple_log);
+        var read_buf: [32768]u8 = undefined;
+        var file_reader = local_file.reader(self.io, &read_buf);
+        return self.uploadFromReader(&file_reader.interface, size, remote_path, simple_log);
     }
 
     /// Upload a buffer to remote server
-    pub fn uploadBuffer(self: *SshSession, buffer: []const u8, remote_path: []const u8, simple_log: bool) !void {
-        var fbs = std.io.fixedBufferStream(buffer);
-        return self.uploadInternal(fbs.reader(), buffer.len, remote_path, simple_log);
+    pub fn uploadBuffer(self: *SshSession, data: []const u8, remote_path: []const u8, simple_log: bool) !void {
+        const sftp = try self.getSftp();
+        const remote_path_z = try self.allocator.dupeZ(u8, remote_path);
+        defer self.allocator.free(remote_path_z);
+
+        const remote_file = c.libssh2_sftp_open_ex(
+            sftp,
+            remote_path_z.ptr,
+            @intCast(remote_path.len),
+            c.LIBSSH2_FXF_WRITE | c.LIBSSH2_FXF_CREAT | c.LIBSSH2_FXF_TRUNC,
+            0,
+            c.LIBSSH2_SFTP_OPENFILE,
+        ) orelse return error.RemoteFileOpenFailed;
+        defer _ = c.libssh2_sftp_close(remote_file);
+
+        var offset: usize = 0;
+        while (offset < data.len) {
+            const bytes_written = c.libssh2_sftp_write(
+                remote_file,
+                data[offset..].ptr,
+                data.len - offset,
+            );
+            if (bytes_written < 0) return error.WriteFailed;
+            if (bytes_written == 0) continue;
+            offset += @intCast(bytes_written);
+        }
+        _ = simple_log;
     }
 
-    fn uploadInternal(self: *SshSession, reader: anytype, size: u64, remote_path: []const u8, simple_log: bool) !void {
+    fn uploadFromReader(self: *SshSession, reader: *std.Io.Reader, size: u64, remote_path: []const u8, simple_log: bool) !void {
         const sftp = try self.getSftp();
 
         const remote_path_z = try self.allocator.dupeZ(u8, remote_path);
@@ -335,27 +412,27 @@ pub const SshSession = struct {
         };
         defer _ = c.libssh2_sftp_close(remote_file);
 
-        var buffer: [32768]u8 = undefined;
+        var chunk: [32768]u8 = undefined;
         var total_written: usize = 0;
         var last_progress: usize = 0;
 
         while (total_written < size) {
-            const bytes_read = try reader.read(&buffer);
+            var slices = [1][]u8{chunk[0..]};
+            const bytes_read = reader.readVec(slices[0..]) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
             if (bytes_read == 0) break;
 
             var written: usize = 0;
             while (written < bytes_read) {
                 const bytes_written = c.libssh2_sftp_write(
                     remote_file,
-                    buffer[written..].ptr,
+                    chunk[written..].ptr,
                     bytes_read - written,
                 );
-                if (bytes_written < 0) {
-                    return error.WriteFailed;
-                }
-                if (bytes_written == 0) {
-                    continue;
-                }
+                if (bytes_written < 0) return error.WriteFailed;
+                if (bytes_written == 0) continue;
                 written += @intCast(bytes_written);
             }
             total_written += bytes_read;

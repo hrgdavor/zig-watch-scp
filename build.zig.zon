@@ -25,7 +25,7 @@
     .fingerprint = 0x675e6f1be8cea7ec, // Changing this has security and trust implications.
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
@@ -34,7 +34,7 @@
     .dependencies = .{
         .zlib = .{
             .url = "https://github.com/allyourcodebase/zlib/archive/refs/heads/master.tar.gz",
-            .hash = "zlib-1.3.1-1-ZZQ7ldENAAA7qJjUXP6E6xnRuV-jDL9dyoJFc_eb3zQ6",
+            .hash = "zlib-1.3.2-ZZQ7lc8NAAAHm9MDfplvwoesXvk4tVm6VCsiI8KnIbT0",
         },
         .mbedtls = .{
             .url = "https://github.com/allyourcodebase/mbedtls/archive/refs/heads/master.tar.gz",
@@ -44,10 +44,7 @@
             .url = "https://github.com/allyourcodebase/libssh2/archive/refs/heads/master.tar.gz",
             .hash = "libssh2-1.11.1-JgdeR_IVAADECr31WRIbtJ0x0MrnNrmljUx0tb_yzEmD",
         },
-        .simargs = .{
-            .url = "git+https://github.com/jiacai2050/zigcli#67a06e34cbe25a39bb86e35796cc5a0ca45a31f7",
-            .hash = "zigcli-0.3.1-ORC7jBfPAgCnJGpRG8NmsDjsjwhe4oL3fwKLCh-HRw6j",
-        },
+
     },
     .paths = .{
         "build.zig",

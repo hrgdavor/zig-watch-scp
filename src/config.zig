@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-GPL-3.0-with-Commons-Clause
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
-const simargs = @import("simargs");
 
 pub const Folder = struct {
     scpdb: []const u8,
@@ -40,6 +39,7 @@ pub const Config = struct {
     folders: []Folder,
     local_copy_workers: []LocalCopyWorkerConfig,
     exec_cmd: ?[]const u8,
+    watch: bool,
 
     // Standalone create mode
     create_folder: ?[]const u8,
@@ -51,106 +51,14 @@ pub const Config = struct {
     put_file: ?[2][]const u8,
 
     // ─────────────────────────────────────────────────────────────────────────
-    // simargs struct types
+    // parseArgs  (native — no external dependency)
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Used when a subcommand (get/put/create) is present on the command line.
-    const SubArgs = struct {
-        config: ?[]const u8 = null,
-        compress: bool = false,
-        @"simple-log": bool = false,
-        cleanup: bool = false,
-        @"watch-delay": ?u64 = null,
-        exec: ?[]const u8 = null,
-        help: bool = false,
-
-        __commands__: union(enum) {
-            get: struct {
-                help: bool = false,
-
-                pub const __shorts__ = .{ .help = .h };
-                pub const __messages__ = .{ .help = "Show this help message" };
-            },
-            put: struct {
-                help: bool = false,
-
-                pub const __shorts__ = .{ .help = .h };
-                pub const __messages__ = .{ .help = "Show this help message" };
-            },
-            create: struct {
-                includes: ?[]const u8 = null,
-                excludes: ?[]const u8 = null,
-                help: bool = false,
-
-                pub const __shorts__ = .{ .help = .h };
-                pub const __messages__ = .{
-                    .includes = "Comma-separated list of include patterns",
-                    .excludes = "Comma-separated list of exclude patterns",
-                    .help = "Show this help message",
-                };
-            },
-
-            pub const __messages__ = .{
-                .get = "Download a single file: get <remote-path> <local-path>",
-                .put = "Upload a single file:   put <local-path>  <remote-path>",
-                .create = "Create .scpdb for a local folder: create <folder-path>",
-            };
-        },
-
-        pub const __shorts__ = .{
-            .config = .c,
-            .compress = .x,
-            .help = .h,
-        };
-
-        pub const __messages__ = .{
-            .config = "Path to configuration file",
-            .compress = "Enable SSH compression",
-            .@"simple-log" = "Use simple logging (no escape codes for progress)",
-            .cleanup = "Remove remote files not present locally",
-            .@"watch-delay" = "Delay before syncing after change (default: 200 ms)",
-            .exec = "Command to execute on remote after sync",
-            .help = "Show this help message",
-        };
-    };
-
-    /// Used in sync mode (no subcommand).  Positional args: [host] [username] [password].
-    const SyncArgs = struct {
-        config: ?[]const u8 = null,
-        compress: bool = false,
-        @"simple-log": bool = false,
-        cleanup: bool = false,
-        @"watch-delay": ?u64 = null,
-        exec: ?[]const u8 = null,
-        help: bool = false,
-
-        pub const __shorts__ = .{
-            .config = .c,
-            .compress = .x,
-            .help = .h,
-        };
-
-        pub const __messages__ = .{
-            .config = "Path to configuration file",
-            .compress = "Enable SSH compression",
-            .@"simple-log" = "Use simple logging (no escape codes for progress)",
-            .cleanup = "Remove remote files not present locally",
-            .@"watch-delay" = "Delay before syncing after change (default: 200 ms)",
-            .exec = "Command to execute on remote after sync",
-            .help = "Show this help message",
-        };
-    };
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // parseArgs
-    // ─────────────────────────────────────────────────────────────────────────
-
-    pub fn parseArgs(arena_allocator: std.mem.Allocator) !Config {
-        // Strategy: try the full SubArgs parse first.
-        //   • If it succeeds               → subcommand mode.
-        //   • If error.MissingSubCommand   → sync mode, re-parse with SyncArgs.
-        //   • Any other error              → propagate.
-
+    /// Parse command-line arguments collected by the caller (skip argv[0]).
+    /// Supports flags: -c/--config, -x/--compress, --simple-log, --cleanup,
+    ///   --watch-delay <ms>, --exec <cmd>, -h/--help
+    /// Subcommands: get <remote> <local>  |  put <local> <remote>  |  create <folder>
+    pub fn parseArgs(arena_allocator: std.mem.Allocator, init: std.process.Init, raw_args: []const []const u8) !Config {
         var create_folder: ?[]const u8 = null;
         var create_includes = std.ArrayList([]const u8).empty;
         var create_excludes = std.ArrayList([]const u8).empty;
@@ -162,92 +70,144 @@ pub const Config = struct {
         var cli_cleanup: bool = false;
         var cli_watch_delay: ?u64 = null;
         var cli_exec_cmd: ?[]const u8 = null;
+        var cli_watch: bool = false;
         var config_path: ?[]const u8 = null;
         var cli_host: ?[]const u8 = null;
         var cli_username: ?[]const u8 = null;
         var cli_password: ?[]const u8 = null;
 
-        // ── attempt subcommand parse ──────────────────────────────────────────
-        const sub_result = simargs.parse(
-            arena_allocator,
-            SubArgs,
-            "[host] [username] [password]",
-            "0.0.0",
-        ) catch |err| switch (err) {
-            error.MissingSubCommand => null, // → sync mode below
-            else => return err,
-        };
+        // ── subcommand / flag scanning ─────────────────────────────────────────
+        // Subcommands recognized: get, put, create.
+        // Everything before the subcommand is a flag or positional.
+        const Subcmd = enum { none, get, put, create };
+        var subcmd: Subcmd = .none;
+        // create-subcommand-specific flags
+        var create_includes_raw: ?[]const u8 = null;
+        var create_excludes_raw: ?[]const u8 = null;
+        // positionals collected before/after subcommand
+        var positionals = std.ArrayList([]const u8).empty;
+        // post-subcommand positionals (paths for get/put/create)
+        var sub_positionals = std.ArrayList([]const u8).empty;
 
-        if (sub_result) |sub_opt| {
-            // subcommand mode
+        var i: usize = 0;
+        while (i < raw_args.len) : (i += 1) {
+            const arg = raw_args[i];
 
-            cli_compress = sub_opt.args.compress;
-            cli_simple_log = sub_opt.args.@"simple-log";
-            cli_cleanup = sub_opt.args.cleanup;
-            cli_watch_delay = sub_opt.args.@"watch-delay";
-            cli_exec_cmd = sub_opt.args.exec;
-            config_path = sub_opt.args.config;
-
-            switch (sub_opt.args.__commands__) {
-                .get => {
-                    if (sub_opt.positional_args.len < 2) {
-                        std.debug.print("Error: 'get' requires <remote-path> <local-path>\n", .{});
-                        return error.MissingGetPaths;
-                    }
-                    get_file = .{ sub_opt.positional_args[0], sub_opt.positional_args[1] };
-                },
-                .put => {
-                    if (sub_opt.positional_args.len < 2) {
-                        std.debug.print("Error: 'put' requires <local-path> <remote-path>\n", .{});
-                        return error.MissingPutPaths;
-                    }
-                    put_file = .{ sub_opt.positional_args[0], sub_opt.positional_args[1] };
-                },
-                .create => |sub| {
-                    if (sub_opt.positional_args.len < 1) {
-                        std.debug.print("Error: 'create' requires <folder-path>\n", .{});
-                        return error.MissingCreatePath;
-                    }
-                    create_folder = sub_opt.positional_args[0];
-                    if (sub.includes) |inc| {
-                        var it = std.mem.tokenizeAny(u8, inc, ", \t");
-                        while (it.next()) |pat| try create_includes.append(arena_allocator, try arena_allocator.dupe(u8, pat));
-                    }
-                    if (sub.excludes) |exc| {
-                        var it = std.mem.tokenizeAny(u8, exc, ", \t");
-                        while (it.next()) |pat| try create_excludes.append(arena_allocator, try arena_allocator.dupe(u8, pat));
-                    }
-                },
+            // ── detect subcommand ─────────────────────────────────────────
+            if (subcmd == .none and !std.mem.startsWith(u8, arg, "-")) {
+                if (std.mem.eql(u8, arg, "get")) {
+                    subcmd = .get;
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "put")) {
+                    subcmd = .put;
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "create")) {
+                    subcmd = .create;
+                    continue;
+                }
+                // plain positional (host / username / password / lone config path)
+                try positionals.append(arena_allocator, arg);
+                continue;
             }
-        } else {
-            // sync mode (no subcommand)
-            const sync_opt = try simargs.parse(
-                arena_allocator,
-                SyncArgs,
-                "[host] [username] [password]",
-                "0.0.0",
-            );
 
-            cli_compress = sync_opt.args.compress;
-            cli_simple_log = sync_opt.args.@"simple-log";
-            cli_cleanup = sync_opt.args.cleanup;
-            cli_watch_delay = sync_opt.args.@"watch-delay";
-            cli_exec_cmd = sync_opt.args.exec;
-            config_path = sync_opt.args.config;
+            // ── after subcommand: collect flags + positionals ──────────────
+            if (subcmd != .none) {
+                if (std.mem.eql(u8, arg, "--includes") or std.mem.eql(u8, arg, "--include")) {
+                    i += 1;
+                    if (i >= raw_args.len) return error.MissingArgValue;
+                    create_includes_raw = raw_args[i];
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--excludes") or std.mem.eql(u8, arg, "--exclude")) {
+                    i += 1;
+                    if (i >= raw_args.len) return error.MissingArgValue;
+                    create_excludes_raw = raw_args[i];
+                    continue;
+                }
+                if (!std.mem.startsWith(u8, arg, "-")) {
+                    try sub_positionals.append(arena_allocator, arg);
+                    continue;
+                }
+                // fall through to shared flag handling
+            }
 
-            // Positional args: [host] [username] [password]
-            if (config_path == null and sync_opt.positional_args.len == 1) {
-                config_path = sync_opt.positional_args[0];
+            // ── shared flags ─────────────────────────────────────────────
+            if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+                printHelp();
+                std.process.exit(0);
+            } else if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--config")) {
+                i += 1;
+                if (i >= raw_args.len) return error.MissingArgValue;
+                config_path = raw_args[i];
+            } else if (std.mem.eql(u8, arg, "-x") or std.mem.eql(u8, arg, "--compress")) {
+                cli_compress = true;
+            } else if (std.mem.eql(u8, arg, "-w") or std.mem.eql(u8, arg, "--watch")) {
+                cli_watch = true;
+            } else if (std.mem.eql(u8, arg, "--simple-log")) {
+                cli_simple_log = true;
+            } else if (std.mem.eql(u8, arg, "--cleanup")) {
+                cli_cleanup = true;
+            } else if (std.mem.eql(u8, arg, "--watch-delay")) {
+                i += 1;
+                if (i >= raw_args.len) return error.MissingArgValue;
+                cli_watch_delay = try std.fmt.parseInt(u64, raw_args[i], 10);
+            } else if (std.mem.eql(u8, arg, "--exec")) {
+                i += 1;
+                if (i >= raw_args.len) return error.MissingArgValue;
+                cli_exec_cmd = raw_args[i];
             } else {
-                if (sync_opt.positional_args.len > 0) cli_host = sync_opt.positional_args[0];
-                if (sync_opt.positional_args.len > 1) cli_username = sync_opt.positional_args[1];
-                if (sync_opt.positional_args.len > 2) cli_password = sync_opt.positional_args[2];
+                std.debug.print("Error: Unknown argument: {s}\n", .{arg});
+                return error.UnknownArgument;
             }
+        }
+
+        // ── resolve subcommand results ────────────────────────────────────────
+        switch (subcmd) {
+            .none => {
+                // Positional args: single = config path, three = host/user/pass
+                if (config_path == null and positionals.items.len == 1) {
+                    config_path = positionals.items[0];
+                } else {
+                    if (positionals.items.len > 0) cli_host = positionals.items[0];
+                    if (positionals.items.len > 1) cli_username = positionals.items[1];
+                    if (positionals.items.len > 2) cli_password = positionals.items[2];
+                }
+            },
+            .get => {
+                if (sub_positionals.items.len < 2) {
+                    std.debug.print("Error: 'get' requires <remote-path> <local-path>\n", .{});
+                    return error.MissingGetPaths;
+                }
+                get_file = .{ sub_positionals.items[0], sub_positionals.items[1] };
+            },
+            .put => {
+                if (sub_positionals.items.len < 2) {
+                    std.debug.print("Error: 'put' requires <local-path> <remote-path>\n", .{});
+                    return error.MissingPutPaths;
+                }
+                put_file = .{ sub_positionals.items[0], sub_positionals.items[1] };
+            },
+            .create => {
+                if (sub_positionals.items.len < 1) {
+                    std.debug.print("Error: 'create' requires <folder-path>\n", .{});
+                    return error.MissingCreatePath;
+                }
+                create_folder = sub_positionals.items[0];
+                if (create_includes_raw) |inc| {
+                    var it = std.mem.tokenizeAny(u8, inc, ", \t");
+                    while (it.next()) |pat| try create_includes.append(arena_allocator, try arena_allocator.dupe(u8, pat));
+                }
+                if (create_excludes_raw) |exc| {
+                    var it = std.mem.tokenizeAny(u8, exc, ", \t");
+                    while (it.next()) |pat| try create_excludes.append(arena_allocator, try arena_allocator.dupe(u8, pat));
+                }
+            },
         }
 
         // ── validation ────────────────────────────────────────────────────────
         if (config_path == null and create_folder == null and get_file == null and put_file == null) {
-            std.debug.print("Error: -c/--config is required for sync mode.\n", .{});
             return error.MissingArguments;
         }
 
@@ -263,6 +223,7 @@ pub const Config = struct {
             .compress = cli_compress,
             .simple_log = cli_simple_log,
             .cleanup = cli_cleanup,
+            .watch = cli_watch,
             .exec_cmd = if (cli_exec_cmd) |cmd| try arena_allocator.dupe(u8, cmd) else null,
             .text_extensions = try createDefaultTextExtensions(arena_allocator),
             .folders = try arena_allocator.alloc(Folder, 0),
@@ -281,29 +242,20 @@ pub const Config = struct {
 
         // ── read config file ──────────────────────────────────────────────────
         if (config_path) |cp| {
-            const config_file = std.fs.cwd().openFile(cp, .{}) catch |err| {
-                if (err == error.FileNotFound) {
-                    std.debug.print("Error: Configuration file not found: {s}\n", .{cp});
-                }
-                return err;
-            };
-            defer config_file.close();
-            try parseIntoConfig(arena_allocator, &config, config_file);
+            try parseIntoConfig(arena_allocator, init.io, &config, cp);
         }
 
         // Resolve SSH config before environment fallbacks and validation
-        try resolveSshConfig(arena_allocator, &config);
+        try resolveSshConfig(arena_allocator, init, &config);
 
         // Environment variable fallbacks for credentials
         if (config.password.len == 0) {
-            if (std.process.getEnvVarOwned(arena_allocator, "SYNC_SSH_PWD")) |val| {
-                arena_allocator.free(config.password);
+            if (init.minimal.environ.getAlloc(arena_allocator, "SCP_PASSWORD")) |val| {
                 config.password = val;
             } else |_| {}
         }
         if (config.passphrase.len == 0) {
-            if (std.process.getEnvVarOwned(arena_allocator, "SYNC_SSH_PASSPHRASE"))|val| {
-                arena_allocator.free(config.passphrase);
+            if (init.minimal.environ.getAlloc(arena_allocator, "SCP_PASSPHRASE")) |val| {
                 config.passphrase = val;
             } else |_| {}
         }
@@ -320,12 +272,33 @@ pub const Config = struct {
         return config;
     }
 
-    pub fn resolveSshConfig(allocator: std.mem.Allocator, config: *Config) !void {
+    fn printHelp() void {
+        std.debug.print(
+            \\Usage: sync [flags] <config-file>
+            \\       sync [flags] <host> <username> <password>
+            \\       sync [flags] get <remote-path> <local-path>
+            \\       sync [flags] put <local-path> <remote-path>
+            \\       sync [flags] create [--include <pat>] [--exclude <pat>] <folder>
+            \\
+            \\Flags:
+            \\  -c, --config <file>       Path to configuration file
+            \\  -x, --compress            Enable SSH compression
+            \\      --simple-log          Simple logging (no escape codes)
+            \\      --cleanup             Remove remote files not present locally
+            \\      --watch-delay <ms>    Delay before syncing after change (default: 200)
+            \\      --exec <cmd>          Remote command to run after sync
+            \\  -w, --watch               Enable watch mode (continuous sync)
+            \\  -h, --help               Show this help
+            \\
+        , .{});
+    }
+
+    pub fn resolveSshConfig(allocator: std.mem.Allocator, init: std.process.Init, config: *Config) !void {
         var home_path: ?[]u8 = null;
-        if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |val| {
+        if (init.minimal.environ.getAlloc(allocator, "USERPROFILE")) |val| {
             home_path = val;
         } else |_| {
-            if (std.process.getEnvVarOwned(allocator, "HOME")) |val| {
+            if (init.minimal.environ.getAlloc(allocator, "HOME")) |val| {
                 home_path = val;
             } else |_| {}
         }
@@ -336,20 +309,19 @@ pub const Config = struct {
         const ssh_config_path = try std.fs.path.join(allocator, &.{ home_path.?, ".ssh", "config" });
         defer allocator.free(ssh_config_path);
 
-        try resolveSshConfigFile(allocator, config, ssh_config_path, home_path.?);
+        try resolveSshConfigFile(allocator, init.io, config, ssh_config_path, home_path.?);
     }
 
-    pub fn resolveSshConfigFile(allocator: std.mem.Allocator, config: *Config, path: []const u8, home_path: []const u8) !void {
+    pub fn resolveSshConfigFile(allocator: std.mem.Allocator, io: std.Io, config: *Config, path: []const u8, home_path: []const u8) !void {
         if (config.host.len == 0) return;
 
-        const content = std.fs.openFileAbsolute(path, .{}) catch |err| {
+        const content = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024))) catch |err| {
             if (err == error.FileNotFound) return;
             return err;
         };
-        defer content.close();
+        defer allocator.free(content);
 
-        const config_data = try content.readToEndAlloc(allocator, 1024 * 1024);
-        defer allocator.free(config_data);
+        const config_data = content;
 
         var resolved_hostname: ?[]const u8 = null;
         var resolved_port: ?[]const u8 = null;
@@ -384,7 +356,7 @@ pub const Config = struct {
                     resolved_port = try allocator.dupe(u8, value);
                 } else if (std.ascii.eqlIgnoreCase(key, "IdentityFile")) {
                     if (std.mem.startsWith(u8, value, "~")) {
-                        const rel_path = std.mem.trimLeft(u8, value[1..], "/\\");
+                        const rel_path = std.mem.trimStart(u8, value[1..], "/\\");
                         resolved_key = try std.fs.path.join(allocator, &.{ home_path, rel_path });
                     } else {
                         resolved_key = try allocator.dupe(u8, value);
@@ -398,7 +370,7 @@ pub const Config = struct {
             const target_host = resolved_hostname orelse config.host;
             if (resolved_port) |p| {
                 if (std.mem.indexOf(u8, target_host, ":") == null) {
-                    const new_host = try std.fmt.allocPrint(allocator, "{s}:{s}", .{target_host, p});
+                    const new_host = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ target_host, p });
                     allocator.free(config.host);
                     if (has_hostname) allocator.free(target_host);
                     config.host = new_host;
@@ -432,7 +404,6 @@ pub const Config = struct {
         }
     }
 
-
     fn createDefaultTextExtensions(allocator: std.mem.Allocator) ![]const []const u8 {
         const extensions = [_][]const u8{
             ".txt", ".md",  ".c",    ".h",   ".cpp", ".hpp",  ".java", ".py",
@@ -448,10 +419,11 @@ pub const Config = struct {
 
     pub fn parseIntoConfig(
         allocator: std.mem.Allocator,
+        io: std.Io,
         config: *Config,
-        file: std.fs.File,
+        file_path: []const u8,
     ) !void {
-        const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+        const content = try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024)));
         defer allocator.free(content);
 
         var folders = std.ArrayList(Folder).empty;

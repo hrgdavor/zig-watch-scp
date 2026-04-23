@@ -124,27 +124,34 @@ pub const ChecksumDb = struct {
 /// Calculate checksum for a file, normalizing line endings for text files
 pub fn calculateFileChecksum(
     allocator: std.mem.Allocator,
+    io: std.Io,
     file_path: []const u8,
     is_text_file: bool,
 ) !u64 {
-    const file = try std.fs.cwd().openFile(file_path, .{});
-    defer file.close();
-
     if (is_text_file) {
         // For text files, we still need to load and normalize
         // Increase limit to 1GB for text files
-        const content = try file.readToEndAlloc(allocator, 1024 * 1024 * 1024);
+        const content = try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024 * 1024)));
         defer allocator.free(content);
 
         const normalized = try normalizeLineEndings(allocator, content);
         defer allocator.free(normalized);
         return std.hash.Wyhash.hash(0, normalized);
     } else {
+        const file = try std.Io.Dir.cwd().openFile(io, file_path, .{});
+        defer file.close(io);
+
         // For binary files, use streaming to handle any size efficiently
         var hasher = std.hash.Wyhash.init(0);
         var buffer: [12 * 1024]u8 = undefined;
+        var reader_buf: [4096]u8 = undefined;
+        var reader = file.reader(io, &reader_buf);
         while (true) {
-            const bytes_read = try file.read(&buffer);
+            var slices = [1][]u8{buffer[0..]};
+            const bytes_read = reader.interface.readVec(slices[0..]) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
             if (bytes_read == 0) break;
             hasher.update(buffer[0..bytes_read]);
         }

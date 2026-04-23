@@ -18,15 +18,17 @@ pub const Scanner = struct {
     config: *const Config,
     folder: *const Folder,
     files: std.ArrayList(FileEntry),
-    mutex: std.Thread.Mutex,
+    io: std.Io,
+    mutex: std.Io.Mutex,
 
-    pub fn init(allocator: std.mem.Allocator, config: *const Config, folder: *const Folder) Scanner {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: *const Config, folder: *const Folder) Scanner {
         return .{
             .allocator = allocator,
+            .io = io,
             .config = config,
             .folder = folder,
             .files = std.ArrayList(FileEntry).empty,
-            .mutex = std.Thread.Mutex{},
+            .mutex = std.Io.Mutex.init,
         };
     }
 
@@ -38,10 +40,9 @@ pub const Scanner = struct {
     }
 
     pub fn scanDirectory(self: *Scanner) !void {
-        const dir = try std.fs.cwd().openDir(self.folder.local_dir, .{ .iterate = true });
+        const dir = try std.Io.Dir.cwd().openDir(self.io, self.folder.local_dir, .{ .iterate = true });
         var dir_copy = dir;
-        defer dir_copy.close();
-
+        defer dir_copy.close(self.io);
         var walker = try dir.walk(self.allocator);
         defer walker.deinit();
 
@@ -54,7 +55,7 @@ pub const Scanner = struct {
             file_paths.deinit(self.allocator);
         }
 
-        while (try walker.next()) |entry| {
+        while (try walker.next(self.io)) |entry| {
             if (entry.kind != .file) continue;
 
             // Check include/exclude patterns
@@ -219,16 +220,16 @@ pub const Scanner = struct {
         const full_path = try std.fs.path.join(scanner.allocator, &[_][]const u8{ scanner.folder.local_dir, rel_path });
         defer scanner.allocator.free(full_path);
 
-        const stat = try std.fs.cwd().statFile(full_path);
-        const mtime: i64 = @intCast(@divTrunc(stat.mtime, std.time.ns_per_ms));
+        const stat = try std.Io.Dir.cwd().statFile(scanner.io, full_path, .{});
+        const mtime: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_ms));
 
         const is_text = checksum_db.isTextFile(rel_path, scanner.config.text_extensions);
-        const checksum = try checksum_db.calculateFileChecksum(scanner.allocator, full_path, is_text);
+        const checksum = try checksum_db.calculateFileChecksum(scanner.allocator, scanner.io, full_path, is_text);
 
         const owned_path = try scanner.allocator.dupe(u8, rel_path);
 
-        scanner.mutex.lock();
-        defer scanner.mutex.unlock();
+        try scanner.mutex.lock(scanner.io);
+        defer scanner.mutex.unlock(scanner.io);
 
         try scanner.files.append(scanner.allocator, .{
             .path = owned_path,

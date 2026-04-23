@@ -17,7 +17,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
     stream: c.FSEventStreamRef,
     run_loop: c.CFRunLoopRef,
     event_queue: std.ArrayList(watcher.FileChange),
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !@This() {
         const path_cfstring = c.CFStringCreateWithCString(
@@ -41,7 +41,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
             .stream = undefined,
             .run_loop = undefined,
             .event_queue = std.ArrayList(watcher.FileChange).empty,
-            .mutex = std.Thread.Mutex{},
+            .mutex = std.Io.Mutex.init,
         };
 
         var context = c.FSEventStreamContext{
@@ -109,7 +109,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
             else
                 path;
 
-            const rel_path_trimmed = std.mem.trimLeft(u8, rel_path, "/");
+            const rel_path_trimmed = std.mem.trimStart(u8, rel_path, "/");
 
             const kind: watcher.ChangeKind = if (flags & c.kFSEventStreamEventFlagItemCreated != 0)
                 .created
@@ -184,15 +184,15 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
     }
 
     fn scanInto(self: *@This(), path: []const u8, out: *std.StringHashMap(FileState)) !void {
-        var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch return;
+        var dir = std.Io.Dir.cwd().openDir(path, .{ .iterate = true }) catch return;
         defer dir.close();
         var it = dir.iterate();
         while (try it.next()) |entry| {
             const full = try std.fs.path.join(self.allocator, &.{ path, entry.name });
             defer self.allocator.free(full);
-            const rel = std.mem.trimLeft(u8, full[self.base_path.len..], "/");
+            const rel = std.mem.trimStart(u8, full[self.base_path.len..], "/");
             if (entry.kind == .file) {
-                const stat = std.fs.cwd().statFile(full) catch continue;
+                const stat = std.Io.Dir.cwd().statFile(full) catch continue;
                 const key = try self.allocator.dupe(u8, rel);
                 try out.put(key, .{ .mtime_ns = stat.mtime });
             } else if (entry.kind == .directory) {

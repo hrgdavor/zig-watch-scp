@@ -10,7 +10,7 @@ const FileEntry = @import("scanner.zig").FileEntry;
 pub const Watcher = @import("watcher.zig").Watcher;
 const checksum_db = @import("checksum_db.zig");
 
-pub var ssh_mutex = std.Thread.Mutex{};
+pub var ssh_mutex = std.Io.Mutex.init;
 
 pub const FolderSync = struct {
     folder: *const Folder,
@@ -21,6 +21,7 @@ pub const FolderSync = struct {
 
 pub fn performInitialSync(
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: *const Config,
     folder: *const Folder,
     ssh: *SshSession,
@@ -28,10 +29,8 @@ pub fn performInitialSync(
     remote_db_path: []const u8,
 ) !void {
     std.debug.print("Scanning local directory: {s}\n", .{folder.local_dir});
-
-    var scanner = Scanner.init(allocator, config, folder);
+    var scanner = Scanner.init(allocator, io, config, folder);
     defer scanner.deinit();
-
     try scanner.scanDirectory();
     std.debug.print("Found {} local files.\n", .{scanner.files.items.len});
 
@@ -65,6 +64,7 @@ pub fn performInitialSync(
         // Multi-threaded mode
         var work_ctx = WorkContext{
             .allocator = allocator,
+            .io = io,
             .config = config,
             .folder = folder,
             .ssh = ssh,
@@ -73,7 +73,7 @@ pub fn performInitialSync(
             .next_index = 0,
             .completed = 0,
             .total = changed_files.items.len,
-            .mutex = std.Thread.Mutex{},
+            .mutex = std.Io.Mutex.init,
             .has_error = false,
         };
 
@@ -100,9 +100,9 @@ pub fn performInitialSync(
     }
 
     // Save updated database
-    ssh_mutex.lock();
-    defer ssh_mutex.unlock();
-    try saveDatabase(allocator, config, folder, remote_db, ssh, remote_db_path);
+    try ssh_mutex.lock(io);
+    defer ssh_mutex.unlock(io);
+    try saveDatabase(allocator, io, config, folder, remote_db, ssh, remote_db_path);
 
     // Initial Cleanup if requested
     if (config.cleanup) {
@@ -172,6 +172,7 @@ pub fn performCleanup(
 
 pub const WorkContext = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: *const Config,
     folder: *const Folder,
     ssh: *SshSession,
@@ -180,7 +181,7 @@ pub const WorkContext = struct {
     next_index: usize,
     completed: usize,
     total: usize,
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     has_error: bool,
 };
 
@@ -191,6 +192,7 @@ pub fn uploadWorker(ctx: *WorkContext) void {
     // In multi-threaded mode, each worker gets its own session for true parallelism
     local_ssh = SshSession.init(
         ctx.allocator,
+        ctx.io,
         ctx.config.host,
         ctx.config.username,
         ctx.config.password,
@@ -199,22 +201,22 @@ pub fn uploadWorker(ctx: *WorkContext) void {
         ctx.config.compress,
     ) catch |err| {
         std.debug.print("Worker failed to connect: {s}\n", .{@errorName(err)});
-        ctx.mutex.lock();
+        ctx.mutex.lock(ctx.io) catch {};
         ctx.has_error = true;
-        ctx.mutex.unlock();
+        ctx.mutex.unlock(ctx.io);
         return;
     };
 
     while (true) {
         // Get next file to upload
-        ctx.mutex.lock();
+        ctx.mutex.lock(ctx.io) catch break;
         if (ctx.next_index >= ctx.files.len) {
-            ctx.mutex.unlock();
+            ctx.mutex.unlock(ctx.io);
             break;
         }
         const index = ctx.next_index;
         ctx.next_index += 1;
-        ctx.mutex.unlock();
+        ctx.mutex.unlock(ctx.io);
 
         const entry = ctx.files[index];
 
@@ -223,19 +225,19 @@ pub fn uploadWorker(ctx: *WorkContext) void {
         // Upload file (using local session, no global lock)
         syncFile(ctx.allocator, ctx.config, ctx.folder, &local_ssh.?, entry.path) catch |err| {
             std.debug.print("Upload failed for {s}: {s}\n", .{ entry.path, @errorName(err) });
-            ctx.mutex.lock();
+            ctx.mutex.lock(ctx.io) catch {};
             ctx.has_error = true;
-            ctx.mutex.unlock();
+            ctx.mutex.unlock(ctx.io);
             continue;
         };
 
         // Update progress AND database (thread-safe)
-        ctx.mutex.lock();
+        ctx.mutex.lock(ctx.io) catch {};
         ctx.completed += 1;
         ctx.remote_db.put(entry.path, entry.checksum, entry.mtime) catch {};
         const completed = ctx.completed;
         const total = ctx.total;
-        ctx.mutex.unlock();
+        ctx.mutex.unlock(ctx.io);
 
         std.debug.print("[{}/{}] Synced: {s}\n", .{ completed, total, entry.path });
     }
@@ -273,6 +275,7 @@ pub fn syncFile(
 
 pub fn watchFolderThread(
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: *const Config,
     ssh: *SshSession,
     fs: *FolderSync,
@@ -305,7 +308,7 @@ pub fn watchFolderThread(
             if (event.kind == .created or event.kind == .modified) {
                 if (!shouldSyncFile(event.path, fs.folder)) continue;
 
-                const target_time = std.time.milliTimestamp() + @as(i64, @intCast(config.watch_delay_ms));
+                const target_time = @as(i64, @intCast(@divTrunc(std.Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_ms))) + @as(i64, @intCast(config.watch_delay_ms));
 
                 if (pending_syncs.getEntry(event.path)) |entry| {
                     entry.value_ptr.* = target_time;
@@ -320,7 +323,7 @@ pub fn watchFolderThread(
         }
 
         // 2. Identify ready files
-        const now = std.time.milliTimestamp();
+        const now = @as(i64, @intCast(@divTrunc(std.Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_ms)));
         var it = pending_syncs.iterator();
         while (it.next()) |entry| {
             if (now >= entry.value_ptr.*) {
@@ -332,7 +335,7 @@ pub fn watchFolderThread(
         for (ready_paths.items) |rel_path| {
             _ = pending_syncs.remove(rel_path);
 
-            processReadySync(allocator, config, ssh, fs, rel_path) catch |err| {
+            processReadySync(allocator, io, config, ssh, fs, rel_path) catch |err| {
                 std.debug.print("Error syncing {s}: {}\n", .{ rel_path, err });
             };
 
@@ -344,6 +347,7 @@ pub fn watchFolderThread(
 
 pub fn processReadySync(
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: *const Config,
     ssh: *SshSession,
     fs: *FolderSync,
@@ -353,15 +357,15 @@ pub fn processReadySync(
     defer allocator.free(local_path);
 
     // Check if file still exists
-    std.fs.cwd().access(local_path, .{}) catch return;
+    std.Io.Dir.cwd().access(io, local_path, .{}) catch return;
 
     // Check if actually a file and get mtime
-    const stat = std.fs.cwd().statFile(local_path) catch return;
+    const stat = std.Io.Dir.cwd().statFile(io, local_path, .{}) catch return;
     if (stat.kind == .directory) return;
-    const mtime: i64 = @intCast(@divTrunc(stat.mtime, std.time.ns_per_ms));
+    const mtime: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_ms));
 
     const is_text = checksum_db.isTextFile(rel_path, config.text_extensions);
-    const checksum = try checksum_db.calculateFileChecksum(allocator, local_path, is_text);
+    const checksum = try checksum_db.calculateFileChecksum(allocator, io, local_path, is_text);
 
     // Check if actually changed
     if (fs.remote_db.get(rel_path)) |old_entry| {
@@ -373,13 +377,13 @@ pub fn processReadySync(
 
     std.debug.print("[{s}] Uploading: {s}\n", .{ fs.folder.local_dir, rel_path });
 
-    ssh_mutex.lock();
-    defer ssh_mutex.unlock();
+    try ssh_mutex.lock(io);
+    defer ssh_mutex.unlock(io);
 
     try syncFile(allocator, config, fs.folder, ssh, rel_path);
 
     try fs.remote_db.put(rel_path, checksum, mtime);
-    try saveDatabase(allocator, config, fs.folder, &fs.remote_db, ssh, fs.remote_db_path);
+    try saveDatabase(allocator, io, config, fs.folder, &fs.remote_db, ssh, fs.remote_db_path);
 
     if (config.exec_cmd) |cmd| {
         std.debug.print("[{s}] Executing remote command: {s}\n", .{ fs.folder.local_dir, cmd });
@@ -430,17 +434,19 @@ pub fn performSyncTrigger(
 
 pub fn saveDatabase(
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: *const Config,
     folder: *const Folder,
     db: *ChecksumDb,
     ssh: *SshSession,
     db_path: []const u8,
 ) !void {
-    var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(allocator);
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
 
-    const writer = buffer.writer(allocator);
-    try db.serialize(writer);
+    try db.serialize(&aw.writer);
+
+    const data = aw.writer.buffer[0..aw.writer.end];
 
     if (folder.local_db) {
         const full_path = if (std.fs.path.isAbsolute(folder.scpdb))
@@ -450,11 +456,14 @@ pub fn saveDatabase(
         defer allocator.free(full_path);
 
         std.debug.print("[{s}] Saving database locally to {s}...\n", .{ folder.local_dir, full_path });
-        const file = try std.fs.cwd().createFile(full_path, .{});
-        defer file.close();
-        try file.writeAll(buffer.items);
+        const file = try std.Io.Dir.cwd().createFile(io, full_path, .{});
+        defer file.close(io);
+        var write_buf: [4096]u8 = undefined;
+        var file_writer = file.writer(io, &write_buf);
+        try file_writer.interface.writeAll(data);
+        try file_writer.interface.flush();
     } else {
         std.debug.print("[{s}] Uploading database to {s}...\n", .{ folder.local_dir, db_path });
-        try ssh.uploadBuffer(buffer.items, db_path, config.simple_log);
+        try ssh.uploadBuffer(data, db_path, config.simple_log);
     }
 }

@@ -29,15 +29,9 @@ pub fn build(b: *std.Build) void {
 
     const ssh2_lib = libssh2_dep.artifact("ssh2");
     if (use_zlib) {
-        ssh2_lib.linkLibrary(zlib_dep.?.artifact("z"));
+        ssh2_lib.root_module.linkLibrary(zlib_dep.?.artifact("z"));
     }
-    ssh2_lib.linkLibrary(mbedtls_dep.artifact("mbedtls"));
-
-    const simargs_dep = b.dependency("simargs", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const simargs_mod = simargs_dep.module("simargs");
+    ssh2_lib.root_module.linkLibrary(mbedtls_dep.artifact("mbedtls"));
 
     const exe = b.addExecutable(.{
         .name = "sync",
@@ -45,18 +39,19 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("sync.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{
-                .{ .name = "simargs", .module = simargs_mod },
-            },
         }),
     });
 
     if (use_zlib) {
-        exe.linkLibrary(zlib_dep.?.artifact("z"));
+        exe.root_module.linkLibrary(zlib_dep.?.artifact("z"));
     }
-    exe.linkLibrary(mbedtls_dep.artifact("mbedtls"));
-    exe.linkLibrary(libssh2_dep.artifact("ssh2"));
-    exe.linkLibC();
+    exe.root_module.linkLibrary(mbedtls_dep.artifact("mbedtls"));
+    exe.root_module.linkLibrary(libssh2_dep.artifact("ssh2"));
+    exe.root_module.link_libc = true;
+
+    if (target.result.os.tag == .windows) {
+        exe.root_module.linkSystemLibrary("ws2_32", .{});
+    }
 
     const build_opts = b.addOptions();
     const use_coreservices = target.result.os.tag == .macos and builtin.os.tag == .macos;
@@ -64,7 +59,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addOptions("build_options", build_opts);
 
     if (use_coreservices) {
-        exe.linkFramework("CoreServices");
+        exe.root_module.linkFramework("CoreServices", .{});
         if (b.sysroot) |sysroot| {
             exe.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
             exe.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
@@ -76,6 +71,9 @@ pub fn build(b: *std.Build) void {
     if (optimize != .Debug) {
         exe.root_module.strip = true;
     }
+
+    // Add src/ to include paths so cImport can find socket_compat.h
+    exe.root_module.addSystemIncludePath(b.path("src"));
 
     const install_exe = b.addInstallArtifact(exe, .{
         .dest_dir = .{ .override = .prefix },

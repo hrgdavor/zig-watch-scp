@@ -8,25 +8,42 @@ const Scanner = @import("src/scanner.zig").Scanner;
 const ssh_worker = @import("src/ssh_worker.zig");
 const local_worker = @import("src/local_worker.zig");
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     try SshSession.libInit();
     defer SshSession.libExit();
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = init.gpa;
 
     var parse_arena = std.heap.ArenaAllocator.init(allocator);
     defer parse_arena.deinit();
 
+    const args = try init.minimal.args.toSlice(parse_arena.allocator());
+    // skip executable name
+    const app_args = if (args.len > 1) args[1..] else &[_][]const u8{};
+
     // Parse configuration
-    var config = Config.parseArgs(parse_arena.allocator()) catch |err| {
+    var config = Config.parseArgs(parse_arena.allocator(), init, app_args) catch |err| {
+        switch (err) {
+            error.MissingArguments => {
+                std.debug.print("Error: -c/--config is required for sync mode.\n", .{});
+                std.process.exit(1);
+            },
+            error.MissingArgValue => {
+                std.debug.print("Error: Missing argument value.\n", .{});
+                std.process.exit(1);
+            },
+            error.UnknownArgument => {
+                std.debug.print("Error: Unknown argument.\n", .{});
+                std.process.exit(1);
+            },
+            else => {},
+        }
         return err;
     };
 
     // Check for standalone create mode
     if (config.create_folder) |create_path| {
-        try handleCreateDb(allocator, &config, create_path);
+        try handleCreateDb(allocator, init.io, &config, create_path);
         return;
     }
 
@@ -43,7 +60,7 @@ pub fn main() !void {
     }
 
     for (config.local_copy_workers, 0..) |*lw_config, i| {
-        local_workers[i] = try local_worker.LocalCopyWorker.init(allocator, &config, lw_config);
+        local_workers[i] = try local_worker.LocalCopyWorker.init(allocator, init.io, &config, lw_config);
         try local_workers[i].performInitialSync();
     }
 
@@ -68,10 +85,7 @@ pub fn main() !void {
     std.debug.print("Connecting to {s}@{s}...\n", .{ config.username, config.host });
 
     // Connect to SSH
-    var ssh = SshSession.init(allocator, config.host, config.username, config.password, config.key_path, config.passphrase, config.compress) catch |err| {
-        std.debug.print("SSH error: {s}\n", .{@errorName(err)});
-        return err;
-    };
+    var ssh = try SshSession.init(allocator, init.io, config.host, config.username, config.password, config.key_path, config.passphrase, config.compress);
     defer ssh.deinit();
 
     std.debug.print("Connected successfully!\n", .{});
@@ -105,8 +119,9 @@ pub fn main() !void {
 
     // Initialize all folders
     var folder_syncs = try allocator.alloc(ssh_worker.FolderSync, config.folders.len);
+    var folder_syncs_count: usize = 0;
     defer {
-        for (folder_syncs) |*fs| {
+        for (folder_syncs[0..folder_syncs_count]) |*fs| {
             fs.remote_db.deinit();
             allocator.free(fs.remote_db_path);
             fs.watcher.deinit();
@@ -128,9 +143,7 @@ pub fn main() !void {
             else
                 try std.fs.path.resolve(allocator, &[_][]const u8{ folder.local_dir, folder.scpdb });
 
-            if (std.fs.cwd().openFile(db_path, .{})) |file| {
-                defer file.close();
-                const content = try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+            if (std.Io.Dir.cwd().readFileAlloc(init.io, db_path, allocator, @as(std.Io.Limit, @enumFromInt(10 * 1024 * 1024)))) |content| {
                 defer allocator.free(content);
                 remote_db.deinit();
                 remote_db = try ChecksumDb.deserialize(allocator, content);
@@ -146,24 +159,23 @@ pub fn main() !void {
             db_path = mutable_db_path;
 
             std.debug.print("Downloading remote checksum database from {s}...\n", .{db_path});
-            const random_id = std.crypto.random.int(u64);
+            var random_id: u64 = undefined;
+            init.io.random(std.mem.asBytes(&random_id));
             var tmp_name: [64]u8 = undefined;
             const tmp_path = try std.fmt.bufPrint(&tmp_name, ".scpdb.{x}.tmp", .{random_id});
 
-            ssh_worker.ssh_mutex.lock();
+            ssh_worker.ssh_mutex.lock(init.io) catch {};
             if (ssh.downloadFile(db_path, tmp_path)) |_| {
-                ssh_worker.ssh_mutex.unlock();
-                if (std.fs.cwd().openFile(tmp_path, .{})) |file| {
-                    defer file.close();
-                    defer std.fs.cwd().deleteFile(tmp_path) catch {};
-                    const content = try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+                ssh_worker.ssh_mutex.unlock(init.io);
+                if (std.Io.Dir.cwd().readFileAlloc(init.io, tmp_path, allocator, @as(std.Io.Limit, @enumFromInt(10 * 1024 * 1024)))) |content| {
+                    defer std.Io.Dir.cwd().deleteFile(init.io, tmp_path) catch {};
                     defer allocator.free(content);
                     remote_db.deinit();
                     remote_db = try ChecksumDb.deserialize(allocator, content);
                     std.debug.print("Loaded remote database with {} entries.\n", .{remote_db.entries.count()});
                 } else |_| {}
             } else |err| {
-                ssh_worker.ssh_mutex.unlock();
+                ssh_worker.ssh_mutex.unlock(init.io);
                 if (err == error.RemoteFileOpenFailed) {
                     std.debug.print("No remote database found, starting fresh sync.\n", .{});
                 } else {
@@ -175,10 +187,10 @@ pub fn main() !void {
         }
 
         // Perform initial sync with timing
-        const sync_start = std.time.milliTimestamp();
-        try ssh_worker.performInitialSync(allocator, &config, folder, &ssh, &remote_db, db_path);
-        const sync_end = std.time.milliTimestamp();
-        const sync_duration = @as(f64, @floatFromInt(sync_end - sync_start)) / 1000.0;
+        const t0 = std.Io.Timestamp.now(init.io, .boot);
+        try ssh_worker.performInitialSync(allocator, init.io, &config, folder, &ssh, &remote_db, db_path);
+        const elapsed_ns = t0.durationTo(std.Io.Timestamp.now(init.io, .boot)).nanoseconds;
+        const sync_duration = @as(f64, @floatFromInt(@as(i64, @intCast(elapsed_ns)))) / @as(f64, @floatFromInt(std.time.ns_per_s));
         std.debug.print("Initial sync completed in {d:.2} seconds.\n\n", .{sync_duration});
 
         // Initialize watcher
@@ -190,31 +202,36 @@ pub fn main() !void {
             .remote_db_path = db_path,
             .watcher = watcher_inst,
         };
+        folder_syncs_count += 1;
     }
 
-    // Start watching all folders
-    std.debug.print("\nStarting file watchers for {} folders...\n", .{folder_syncs.len + local_workers.len});
-    std.debug.print("Press Ctrl+C to stop.\n\n", .{});
+    if (config.watch) {
+        // Start watching all folders
+        std.debug.print("\nStarting file watchers for {} folders...\n", .{folder_syncs.len + local_workers.len});
+        std.debug.print("Press Ctrl+C to stop.\n\n", .{});
 
-    // For simplicity, we create a thread for each folder watcher
-    var threads = try allocator.alloc(std.Thread, folder_syncs.len + local_workers.len);
-    defer allocator.free(threads);
+        // For simplicity, we create a thread for each folder watcher
+        var threads = try allocator.alloc(std.Thread, folder_syncs.len + local_workers.len);
+        defer allocator.free(threads);
 
-    for (folder_syncs, 0..) |*fs, i| {
-        threads[i] = try std.Thread.spawn(.{}, ssh_worker.watchFolderThread, .{ allocator, &config, &ssh, fs });
-    }
+        for (folder_syncs, 0..) |*fs, i| {
+            threads[i] = try std.Thread.spawn(.{}, ssh_worker.watchFolderThread, .{ allocator, init.io, &config, &ssh, fs });
+        }
 
-    for (local_workers, 0..) |*lw, i| {
-        threads[folder_syncs.len + i] = try std.Thread.spawn(.{}, local_worker.watchLocalCopyThread, .{lw});
-    }
+        for (local_workers, 0..) |*lw, i| {
+            threads[folder_syncs.len + i] = try std.Thread.spawn(.{}, local_worker.watchLocalCopyThread, .{lw});
+        }
 
-    // Join threads
-    for (threads) |thread| {
-        thread.join();
+        // Join threads
+        for (threads) |thread| {
+            thread.join();
+        }
+    } else {
+        std.debug.print("\nSync completed. Watch mode not enabled (-w to enable).\n", .{});
     }
 }
 
-fn handleCreateDb(allocator: std.mem.Allocator, config: *const Config, folder_path: []const u8) !void {
+fn handleCreateDb(allocator: std.mem.Allocator, io: anytype, config: *const Config, folder_path: []const u8) !void {
     std.debug.print("Creating .scpdb for: {s}\n", .{folder_path});
 
     var temp_folder = @import("src/config.zig").Folder{
@@ -229,7 +246,7 @@ fn handleCreateDb(allocator: std.mem.Allocator, config: *const Config, folder_pa
     };
 
     // Scan directory
-    var scanner = Scanner.init(allocator, config, &temp_folder);
+    var scanner = Scanner.init(allocator, io, config, &temp_folder);
     defer scanner.deinit();
 
     try scanner.scanDirectory();
@@ -247,11 +264,11 @@ fn handleCreateDb(allocator: std.mem.Allocator, config: *const Config, folder_pa
     const db_path = try std.fs.path.join(allocator, &[_][]const u8{ folder_path, ".scpdb" });
     defer allocator.free(db_path);
 
-    const file = try std.fs.cwd().createFile(db_path, .{});
-    defer file.close();
+    const file = try std.Io.Dir.cwd().createFile(io, db_path, .{});
+    defer file.close(io);
 
     var buffer: [4096]u8 = undefined;
-    var writer = std.fs.File.Writer.init(file, &buffer);
+    var writer = file.writer(io, &buffer);
     try db.serialize(&writer.interface);
     try writer.interface.flush();
 

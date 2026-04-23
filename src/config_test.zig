@@ -19,10 +19,10 @@ test "config: parse text_extensions, include, and exclude" {
     ;
 
     const tmp_file_path = "test_sync.conf";
-    const file = try std.fs.cwd().createFile(tmp_file_path, .{});
+    const file = try std.Io.Dir.cwd().createFile(tmp_file_path, .{});
     try file.writeAll(file_content);
     file.close();
-    defer std.fs.cwd().deleteFile(tmp_file_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(tmp_file_path) catch {};
 
     var cfg = Config{
         .host = try allocator.dupe(u8, "127.0.0.1"),
@@ -81,7 +81,7 @@ test "config: parse text_extensions, include, and exclude" {
         allocator.free(cfg.create_excludes);
     }
 
-    const opened_file = try std.fs.cwd().openFile(tmp_file_path, .{});
+    const opened_file = try std.Io.Dir.cwd().openFile(tmp_file_path, .{});
     defer opened_file.close();
 
     try config.Config.parseIntoConfig(allocator, &cfg, opened_file);
@@ -108,10 +108,10 @@ test "ssh_config: resolution" {
     ;
 
     const tmp_ssh_path = "test_ssh_config";
-    const file = try std.fs.cwd().createFile(tmp_ssh_path, .{});
+    const file = try std.Io.Dir.cwd().createFile(tmp_ssh_path, .{});
     try file.writeAll(ssh_config_content);
     file.close();
-    defer std.fs.cwd().deleteFile(tmp_ssh_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(tmp_ssh_path) catch {};
 
     var cfg = Config{
         .host = try allocator.dupe(u8, "myalias"),
@@ -147,7 +147,7 @@ test "ssh_config: resolution" {
         allocator.free(cfg.create_excludes);
     }
 
-    const abs_path = try std.fs.cwd().realpathAlloc(allocator, tmp_ssh_path);
+    const abs_path = try std.Io.Dir.cwd().realpathAlloc(allocator, tmp_ssh_path);
     defer allocator.free(abs_path);
 
     try config.Config.resolveSshConfigFile(allocator, &cfg, abs_path, "/home/testuser");
