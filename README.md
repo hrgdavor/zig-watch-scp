@@ -21,6 +21,7 @@ A cross-platform file synchronization tool written in Zig 0.16 that uses SSH/SCP
 - **Remote Cleanup**: Optional `--cleanup` flag to remove files on the remote server that are not present locally (respects include/exclude patterns)
 - **Sync Trigger**: Copy a specific local file to the remote (or create an empty one) after each synchronization. Useful for triggering remote scripts or CI/CD pipelines in restricted environments.
 - **Colored lines** for copied files
+- **SSH Agent Support**: Compatible with [KeePassXC](https://keepassxc.org/) and other SSH agents for secure, passphrase-free authentication.
 
 ## Usage
 
@@ -151,6 +152,14 @@ The tool automatically checks your `~/.ssh/config` (or `%USERPROFILE%\.ssh\confi
 - **IdentityFile**: Path to your private key (supports `~` expansion)
 
 Explicit settings in `sync.conf` or CLI arguments always take precedence over values found in your SSH config.
+
+### Using with KeePassXC (SSH Agent)
+For enhanced security and convenience, it is highly recommended to use an SSH Agent to manage your keys and passphrases.
+1. **Enable SSH Agent**: In KeePassXC settings, enable the **SSH Agent** feature.
+2. **Add Key**: Add your SSH key to a KeePassXC entry and enable the **SSH Agent** feature for that specific entry.
+3. **Automatic Auth**: The tool will automatically attempt to use any active SSH agent for authentication. This allows you to sync securely without storing your `password` or `passphrase` in the `sync.conf` file.
+
+On Windows, ensure the `OpenSSH Authentication Agent` service is running and configured correctly in KeePassXC (typically via a named pipe).
 
 ### Sync Trigger
 

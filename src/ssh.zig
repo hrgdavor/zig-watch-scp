@@ -127,6 +127,19 @@ pub const SshSession = struct {
         const username_z = try allocator.dupeZ(u8, username);
         defer allocator.free(username_z);
 
+        // Attempt agent authentication first
+        std.debug.print("Attempting SSH agent authentication for user '{s}'...\n", .{username});
+        if (tryAgentAuth(session, username)) {
+            std.debug.print("SSH agent authentication successful!\n", .{});
+            return SshSession{
+                .session = session,
+                .sock = sock,
+                .allocator = allocator,
+                .io = io,
+                .sftp = null,
+            };
+        }
+
         if (key_path.len > 0) {
             const key_path_z = try allocator.dupeZ(u8, key_path);
             defer allocator.free(key_path_z);
@@ -602,3 +615,30 @@ pub const SshSession = struct {
         _ = c.libssh2_channel_wait_closed(channel);
     }
 };
+
+fn tryAgentAuth(session: *c.LIBSSH2_SESSION, username: []const u8) bool {
+    const agent = c.libssh2_agent_init(session) orelse return false;
+    defer {
+        _ = c.libssh2_agent_disconnect(agent);
+        c.libssh2_agent_free(agent);
+    }
+
+    if (c.libssh2_agent_connect(agent) != 0) return false;
+    if (c.libssh2_agent_list_identities(agent) != 0) return false;
+
+    const username_z = std.heap.c_allocator.dupeZ(u8, username) catch return false;
+    defer std.heap.c_allocator.free(username_z);
+
+    var prev_identity: ?*c.libssh2_agent_publickey = null;
+    while (true) {
+        var identity: *c.libssh2_agent_publickey = undefined;
+        const rc = c.libssh2_agent_get_identity(agent, &identity, prev_identity);
+        if (rc == 1) break; // end of list
+        if (rc < 0) return false;
+
+        if (c.libssh2_agent_userauth(agent, username_z.ptr, identity) == 0) return true;
+        prev_identity = identity;
+    }
+
+    return false;
+}
