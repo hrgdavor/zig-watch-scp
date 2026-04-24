@@ -187,7 +187,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
 
     fn scanInto(self: *@This(), path: []const u8, out: *std.StringHashMap(FileState)) !void {
         var dir = std.Io.Dir.cwd().openDir(self.io, path, .{ .iterate = true }) catch return;
-        defer dir.close();
+        defer dir.close(self.io);
         var it = dir.iterate();
         while (try it.next(self.io)) |entry| {
             const full = try std.fs.path.join(self.allocator, &.{ path, entry.name });

@@ -44,7 +44,7 @@ pub const LinuxWatcher = struct {
         try self.addWatch(path);
         const dir = std.Io.Dir.cwd().openDir(self.io, path, .{ .iterate = true }) catch return;
         var dir_copy = dir;
-        defer dir_copy.close();
+        defer dir_copy.close(self.io);
 
         var it = dir.iterate();
         while (try it.next(self.io)) |entry| {
