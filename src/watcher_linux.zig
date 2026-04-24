@@ -47,7 +47,7 @@ pub const LinuxWatcher = struct {
         defer dir_copy.close();
 
         var it = dir.iterate();
-        while (try it.next()) |entry| {
+        while (try it.next(self.io)) |entry| {
             if (entry.kind == .directory) {
                 const subpath = try std.fs.path.join(self.allocator, &[_][]const u8{ path, entry.name });
                 defer self.allocator.free(subpath);

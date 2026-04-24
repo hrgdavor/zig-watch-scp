@@ -189,7 +189,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
         var dir = std.Io.Dir.cwd().openDir(self.io, path, .{ .iterate = true }) catch return;
         defer dir.close();
         var it = dir.iterate();
-        while (try it.next()) |entry| {
+        while (try it.next(self.io)) |entry| {
             const full = try std.fs.path.join(self.allocator, &.{ path, entry.name });
             defer self.allocator.free(full);
             const rel = std.mem.trimStart(u8, full[self.base_path.len..], "/");
