@@ -91,6 +91,7 @@ pub fn build(b: *std.Build) void {
             \\#include <limits.h>
             \\#endif
             \\#ifdef __APPLE__
+            \\#include <mach/message.h>
             \\#include <CoreFoundation/CoreFoundation.h>
             \\#include <FSEvents/FSEvents.h>
             \\#endif
@@ -101,6 +102,7 @@ pub fn build(b: *std.Build) void {
     const libssh2_upstream = b.dependency("libssh2_upstream", .{});
     c_translate.addIncludePath(libssh2_upstream.path("include"));
     c_translate.addIncludePath(b.path("src"));
+    c_translate.defineCMacro("_DARWIN_C_SOURCE", null);
     if (use_coreservices) {
         if (b.sysroot) |sysroot| {
             const frameworks_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });

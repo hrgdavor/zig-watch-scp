@@ -122,7 +122,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
 
             const owned_path = self.allocator.dupe(u8, rel_path_trimmed) catch continue;
 
-            try self.mutex.lock(self.io);
+            self.mutex.lock(self.io) catch return;
             defer self.mutex.unlock(self.io);
 
             self.event_queue.append(self.allocator, .{
