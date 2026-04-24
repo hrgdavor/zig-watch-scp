@@ -631,7 +631,7 @@ fn tryAgentAuth(session: *c.LIBSSH2_SESSION, username: []const u8) bool {
 
     var prev_identity: ?*c.libssh2_agent_publickey = null;
     while (true) {
-        var identity: *c.libssh2_agent_publickey = undefined;
+        var identity: [*c]c.libssh2_agent_publickey = null;
         const rc = c.libssh2_agent_get_identity(agent, &identity, prev_identity);
         if (rc == 1) break; // end of list
         if (rc < 0) return false;
