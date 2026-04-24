@@ -90,11 +90,8 @@ pub fn build(b: *std.Build) void {
             \\#include <unistd.h>
             \\#include <limits.h>
             \\#endif
-            \\#ifdef __APPLE__
-            \\#include <mach/message.h>
-            \\#include <CoreFoundation/CoreFoundation.h>
-            \\#include <FSEvents/FSEvents.h>
-            \\#endif
+            \\// macOS headers are avoided here to bypass translate-c issues with Mach types.
+            \\// CoreFoundation and FSEvents are handled via extern in watcher_macos.zig.
         ),
         .target = target,
         .optimize = optimize,
@@ -102,7 +99,6 @@ pub fn build(b: *std.Build) void {
     const libssh2_upstream = b.dependency("libssh2_upstream", .{});
     c_translate.addIncludePath(libssh2_upstream.path("include"));
     c_translate.addIncludePath(b.path("src"));
-    c_translate.defineCMacro("_DARWIN_C_SOURCE", null);
     if (use_coreservices) {
         if (b.sysroot) |sysroot| {
             const frameworks_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });

@@ -8,31 +8,80 @@ const bopts = @import("build_options");
 // Cross-compiled builds (e.g. from Windows) fall back to a polling watcher.
 const c = @import("c");
 
+// macOS declarations via extern (to avoid translate-c issues)
+const CFTypeRef = ?*anyopaque;
+const CFStringRef = ?*anyopaque;
+const CFArrayRef = ?*anyopaque;
+const CFRunLoopRef = ?*anyopaque;
+const FSEventStreamRef = ?*anyopaque;
+const ConstFSEventStreamRef = ?*anyopaque;
+
+const kCFStringEncodingUTF8: u32 = 0x08000100;
+const kFSEventStreamEventIdSinceNow: u64 = 0xFFFFFFFFFFFFFFFF;
+const kFSEventStreamCreateFlagNoDefer: u32 = 0x00000002;
+const kFSEventStreamCreateFlagFileEvents: u32 = 0x00000010;
+const kFSEventStreamEventFlagItemCreated: u32 = 0x00000100;
+const kFSEventStreamEventFlagItemRemoved: u32 = 0x00000200;
+const kFSEventStreamEventFlagItemModified: u32 = 0x00001000;
+const kCFRunLoopDefaultMode: CFStringRef = null; // null works for default mode in some contexts or we can use a string
+
+const FSEventStreamContext = struct {
+    version: isize,
+    info: ?*anyopaque,
+    retain: ?*const fn (?*anyopaque) callconv(.c) ?*anyopaque,
+    release: ?*const fn (?*anyopaque) callconv(.c) void,
+    copyDescription: ?*const fn (?*anyopaque) callconv(.c) CFStringRef,
+};
+
+const FSEventStreamEventFlags = u32;
+const FSEventStreamEventId = u64;
+
+extern "CoreFoundation" fn CFStringCreateWithCString(alloc: ?*anyopaque, cStr: [*c]const u8, encoding: u32) callconv(.c) CFStringRef;
+extern "CoreFoundation" fn CFRelease(obj: CFTypeRef) callconv(.c) void;
+extern "CoreFoundation" fn CFArrayCreate(alloc: ?*anyopaque, values: [*c]const ?*anyopaque, numValues: isize, callBacks: ?*anyopaque) callconv(.c) CFArrayRef;
+extern "CoreFoundation" fn CFRunLoopGetCurrent() callconv(.c) CFRunLoopRef;
+extern "CoreFoundation" fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, returnAfterSourceHandled: u8) callconv(.c) i32;
+
+extern "CoreServices" fn FSEventStreamCreate(
+    alloc: ?*anyopaque,
+    cb: *const fn (ConstFSEventStreamRef, ?*anyopaque, usize, ?*anyopaque, [*c]const FSEventStreamEventFlags, [*c]const FSEventStreamEventId) callconv(.c) void,
+    context: *const FSEventStreamContext,
+    pathsToWatch: CFArrayRef,
+    sinceWhen: FSEventStreamEventId,
+    latency: f64,
+    flags: u32,
+) callconv(.c) FSEventStreamRef;
+extern "CoreServices" fn FSEventStreamScheduleWithRunLoop(stream: FSEventStreamRef, runLoop: CFRunLoopRef, runLoopMode: CFStringRef) callconv(.c) void;
+extern "CoreServices" fn FSEventStreamStart(stream: FSEventStreamRef) callconv(.c) u8;
+extern "CoreServices" fn FSEventStreamStop(stream: FSEventStreamRef) callconv(.c) void;
+extern "CoreServices" fn FSEventStreamInvalidate(stream: FSEventStreamRef) callconv(.c) void;
+extern "CoreServices" fn FSEventStreamRelease(stream: FSEventStreamRef) callconv(.c) void;
+
 pub const MacOsWatcher = if (bopts.use_coreservices) struct {
     // --- FSEvents implementation (native macOS build) ---
     allocator: std.mem.Allocator,
     base_path: []const u8,
-    stream: c.FSEventStreamRef,
-    run_loop: c.CFRunLoopRef,
+    stream: FSEventStreamRef,
+    run_loop: CFRunLoopRef,
     event_queue: std.ArrayList(watcher.FileChange),
     mutex: std.Io.Mutex,
     io: std.Io,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !@This() {
-        const path_cfstring = c.CFStringCreateWithCString(
+        const path_cfstring = CFStringCreateWithCString(
             null,
             path.ptr,
-            c.kCFStringEncodingUTF8,
+            kCFStringEncodingUTF8,
         ) orelse return error.CFStringCreateFailed;
-        defer c.CFRelease(path_cfstring);
+        defer CFRelease(path_cfstring);
 
-        const paths_array = c.CFArrayCreate(
+        const paths_array = CFArrayCreate(
             null,
             @ptrCast(@constCast(&path_cfstring)),
             1,
             null,
         ) orelse return error.CFArrayCreateFailed;
-        defer c.CFRelease(paths_array);
+        defer CFRelease(paths_array);
 
         var self = @This(){
             .allocator = allocator,
@@ -44,7 +93,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
             .io = io,
         };
 
-        var context = c.FSEventStreamContext{
+        var context = FSEventStreamContext{
             .version = 0,
             .info = @ptrCast(&self),
             .retain = null,
@@ -52,21 +101,21 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
             .copyDescription = null,
         };
 
-        self.stream = c.FSEventStreamCreate(
+        self.stream = FSEventStreamCreate(
             null,
             fseventsCallback,
             &context,
             paths_array,
-            c.kFSEventStreamEventIdSinceNow,
+            kFSEventStreamEventIdSinceNow,
             0.1,
-            c.kFSEventStreamCreateFlagFileEvents | c.kFSEventStreamCreateFlagNoDefer,
+            kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer,
         ) orelse return error.FSEventStreamCreateFailed;
 
-        self.run_loop = c.CFRunLoopGetCurrent();
-        c.FSEventStreamScheduleWithRunLoop(self.stream, self.run_loop, c.kCFRunLoopDefaultMode);
+        self.run_loop = CFRunLoopGetCurrent();
+        FSEventStreamScheduleWithRunLoop(self.stream, self.run_loop, kCFRunLoopDefaultMode);
 
-        if (c.FSEventStreamStart(self.stream) == 0) {
-            c.CFRelease(self.stream);
+        if (FSEventStreamStart(self.stream) == 0) {
+            CFRelease(self.stream);
             return error.FSEventStreamStartFailed;
         }
 
@@ -74,9 +123,9 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
     }
 
     pub fn deinit(self: *@This()) void {
-        c.FSEventStreamStop(self.stream);
-        c.FSEventStreamInvalidate(self.stream);
-        c.FSEventStreamRelease(self.stream);
+        FSEventStreamStop(self.stream);
+        FSEventStreamInvalidate(self.stream);
+        FSEventStreamRelease(self.stream);
 
         for (self.event_queue.items) |event| {
             self.allocator.free(event.path);
@@ -86,12 +135,12 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
     }
 
     fn fseventsCallback(
-        streamRef: c.ConstFSEventStreamRef,
+        streamRef: ConstFSEventStreamRef,
         clientCallBackInfo: ?*anyopaque,
         numEvents: usize,
         eventPaths: ?*anyopaque,
-        eventFlags: [*c]const c.FSEventStreamEventFlags,
-        eventIds: [*c]const c.FSEventStreamEventId,
+        eventFlags: [*c]const FSEventStreamEventFlags,
+        eventIds: [*c]const FSEventStreamEventId,
     ) callconv(.c) void {
         _ = streamRef;
         _ = eventIds;
@@ -111,11 +160,11 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
 
             const rel_path_trimmed = std.mem.trimStart(u8, rel_path, "/");
 
-            const kind: watcher.ChangeKind = if (flags & c.kFSEventStreamEventFlagItemCreated != 0)
+            const kind: watcher.ChangeKind = if (flags & kFSEventStreamEventFlagItemCreated != 0)
                 .created
-            else if (flags & c.kFSEventStreamEventFlagItemRemoved != 0)
+            else if (flags & kFSEventStreamEventFlagItemRemoved != 0)
                 .deleted
-            else if (flags & c.kFSEventStreamEventFlagItemModified != 0)
+            else if (flags & kFSEventStreamEventFlagItemModified != 0)
                 .modified
             else
                 continue;
@@ -135,7 +184,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
     }
 
     pub fn nextEvent(self: *@This()) !?watcher.FileChange {
-        _ = c.CFRunLoopRunInMode(c.kCFRunLoopDefaultMode, 0.01, 1);
+        _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, 1);
 
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -150,7 +199,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
     pub fn wait(self: *@This(), timeout_ms: u32) !void {
         _ = self;
         const timeout_seconds: f64 = @as(f64, @floatFromInt(timeout_ms)) / 1000.0;
-        _ = c.CFRunLoopRunInMode(c.kCFRunLoopDefaultMode, timeout_seconds, 0);
+        _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, timeout_seconds, 0);
     }
 } else struct {
     // --- Polling fallback for cross-compiled macOS builds (no CoreServices SDK) ---
