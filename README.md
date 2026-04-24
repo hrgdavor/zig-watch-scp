@@ -1,6 +1,6 @@
 # Zig File Sync Tool
 
-A cross-platform file synchronization tool written in Zig 0.15 that uses SSH/SCP to sync files to a remote server with intelligent checksum-based change detection.
+A cross-platform file synchronization tool written in Zig 0.16 that uses SSH/SCP to sync files to a remote server with intelligent checksum-based change detection.
 
 ## Features
 
