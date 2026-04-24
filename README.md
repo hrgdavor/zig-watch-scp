@@ -20,6 +20,7 @@ A cross-platform file synchronization tool written in Zig 0.15 that uses SSH/SCP
 - **Granular Pattern Matching**: Individual include/exclude patterns for each folder pair
 - **Remote Cleanup**: Optional `--cleanup` flag to remove files on the remote server that are not present locally (respects include/exclude patterns)
 - **Sync Trigger**: Copy a specific local file to the remote (or create an empty one) after each synchronization. Useful for triggering remote scripts or CI/CD pipelines in restricted environments.
+- **Colored lines** for copied files
 
 ## Usage
 
