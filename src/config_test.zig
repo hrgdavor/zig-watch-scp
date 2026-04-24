@@ -19,10 +19,13 @@ test "config: parse text_extensions, include, and exclude" {
     ;
 
     const tmp_file_path = "test_sync.conf";
-    const file = try std.Io.Dir.cwd().createFile(tmp_file_path, .{});
-    try file.writeAll(file_content);
-    file.close();
-    defer std.Io.Dir.cwd().deleteFile(tmp_file_path) catch {};
+    var io = try std.Io.init(allocator, .{});
+    defer io.deinit();
+
+    const file = try std.Io.Dir.cwd().createFile(io, tmp_file_path, .{});
+    try file.writeAll(io, file_content);
+    file.close(io);
+    defer std.Io.Dir.cwd().deleteFile(io, tmp_file_path) catch {};
 
     var cfg = Config{
         .host = try allocator.dupe(u8, "127.0.0.1"),
@@ -81,10 +84,7 @@ test "config: parse text_extensions, include, and exclude" {
         allocator.free(cfg.create_excludes);
     }
 
-    const opened_file = try std.Io.Dir.cwd().openFile(tmp_file_path, .{});
-    defer opened_file.close();
-
-    try config.Config.parseIntoConfig(allocator, &cfg, opened_file);
+    try config.Config.parseIntoConfig(allocator, io, &cfg, tmp_file_path);
 
     // Verify text_extensions
     try std.testing.expectEqual(@as(usize, 3), cfg.text_extensions.len);
@@ -108,10 +108,13 @@ test "ssh_config: resolution" {
     ;
 
     const tmp_ssh_path = "test_ssh_config";
-    const file = try std.Io.Dir.cwd().createFile(tmp_ssh_path, .{});
-    try file.writeAll(ssh_config_content);
-    file.close();
-    defer std.Io.Dir.cwd().deleteFile(tmp_ssh_path) catch {};
+    var io = try std.Io.init(allocator, .{});
+    defer io.deinit();
+
+    const file = try std.Io.Dir.cwd().createFile(io, tmp_ssh_path, .{});
+    try file.writeAll(io, ssh_config_content);
+    file.close(io);
+    defer std.Io.Dir.cwd().deleteFile(io, tmp_ssh_path) catch {};
 
     var cfg = Config{
         .host = try allocator.dupe(u8, "myalias"),
@@ -147,10 +150,10 @@ test "ssh_config: resolution" {
         allocator.free(cfg.create_excludes);
     }
 
-    const abs_path = try std.Io.Dir.cwd().realpathAlloc(allocator, tmp_ssh_path);
+    const abs_path = try std.Io.Dir.cwd().realpathAlloc(io, allocator, tmp_ssh_path);
     defer allocator.free(abs_path);
 
-    try config.Config.resolveSshConfigFile(allocator, &cfg, abs_path, "/home/testuser");
+    try config.Config.resolveSshConfigFile(allocator, io, &cfg, abs_path, "/home/testuser");
 
     try std.testing.expectEqualStrings("1.2.3.4:2222", cfg.host);
     try std.testing.expectEqualStrings("myuser", cfg.username);

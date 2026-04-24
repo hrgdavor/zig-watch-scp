@@ -102,7 +102,9 @@ pub fn build(b: *std.Build) void {
     c_translate.addIncludePath(b.path("src"));
     if (use_coreservices) {
         if (b.sysroot) |sysroot| {
-            c_translate.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
+            const frameworks_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });
+            c_translate.addFrameworkPath(.{ .cwd_relative = frameworks_path });
+            c_translate.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ frameworks_path, "CoreServices.framework/Frameworks" }) });
             c_translate.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
         }
     }

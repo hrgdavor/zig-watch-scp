@@ -122,8 +122,8 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
 
             const owned_path = self.allocator.dupe(u8, rel_path_trimmed) catch continue;
 
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
 
             self.event_queue.append(self.allocator, .{
                 .path = owned_path,
@@ -137,8 +137,8 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
     pub fn nextEvent(self: *@This()) !?watcher.FileChange {
         _ = c.CFRunLoopRunInMode(c.kCFRunLoopDefaultMode, 0.01, 1);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (self.event_queue.items.len > 0) {
             return self.event_queue.orderedRemove(0);

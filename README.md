@@ -8,7 +8,7 @@ A cross-platform file synchronization tool written in Zig 0.15 that uses SSH/SCP
 - **Multiple Sync Pairs**: Support for multiple independent folder pairs in a single configuration
 - **Remote/Local Checksum Database**: Maintains `.scpdb` for fast change detection. Supports local storage and absolute paths.
 - **Absolute Path Support**: Use absolute paths for `.scpdb` on both local and remote filesystems.
-- **Relative path**: based on current folder sou config can be reused when using git worktrees for shipping code for QA
+- **Relative path**: based on current folder so a config can be reused when using git worktrees for shipping code for QA
 - **SSH Config Integration**: Automatically resolves connection details (host, username, port, and identity file) from your system's `~/.ssh/config` file.
 - **Text File Normalization**: Automatically normalizes line endings (CRLF → LF) for text files before checksumming
 - **Parallel Initial Sync**: Configurable thread count for fast initial synchronization across all folders
