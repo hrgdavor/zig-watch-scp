@@ -75,6 +75,41 @@ pub fn build(b: *std.Build) void {
     // Add src/ to include paths so cImport can find socket_compat.h
     exe.root_module.addSystemIncludePath(b.path("src"));
 
+    const c_translate = b.addTranslateC(.{
+        .root_source_file = b.addWriteFiles().add("c_include.h", 
+            \\#define LIBSSH2_STATIC 1
+            \\#undef _FORTIFY_SOURCE
+            \\#define _FORTIFY_SOURCE 0
+            \\#define __builtin_va_arg_pack_len() 0
+            \\#define __builtin_va_arg_pack() 
+            \\#include <libssh2.h>
+            \\#include <libssh2_sftp.h>
+            \\#include "socket_compat.h"
+            \\#ifdef __linux__
+            \\#include <sys/inotify.h>
+            \\#include <unistd.h>
+            \\#include <limits.h>
+            \\#endif
+            \\#ifdef __APPLE__
+            \\#include <CoreServices/CoreServices.h>
+            \\#endif
+        ),
+        .target = target,
+        .optimize = optimize,
+    });
+    const libssh2_upstream = b.dependency("libssh2_upstream", .{});
+    c_translate.addIncludePath(libssh2_upstream.path("include"));
+    c_translate.addIncludePath(b.path("src"));
+    if (use_coreservices) {
+        if (b.sysroot) |sysroot| {
+            c_translate.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
+            c_translate.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
+        }
+    }
+    
+    const c_module = c_translate.addModule("c");
+    exe.root_module.addImport("c", c_module);
+
     const install_exe = b.addInstallArtifact(exe, .{
         .dest_dir = .{ .override = .prefix },
     });

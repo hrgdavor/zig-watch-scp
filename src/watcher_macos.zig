@@ -6,9 +6,7 @@ const bopts = @import("build_options");
 
 // Only compile CoreServices C headers when building natively on macOS.
 // Cross-compiled builds (e.g. from Windows) fall back to a polling watcher.
-const c = if (bopts.use_coreservices) @cImport({
-    @cInclude("CoreServices/CoreServices.h");
-}) else struct {};
+const c = @import("c");
 
 pub const MacOsWatcher = if (bopts.use_coreservices) struct {
     // --- FSEvents implementation (native macOS build) ---
@@ -18,8 +16,9 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
     run_loop: c.CFRunLoopRef,
     event_queue: std.ArrayList(watcher.FileChange),
     mutex: std.Io.Mutex,
+    io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator, path: []const u8) !@This() {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !@This() {
         const path_cfstring = c.CFStringCreateWithCString(
             null,
             path.ptr,
@@ -42,6 +41,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
             .run_loop = undefined,
             .event_queue = std.ArrayList(watcher.FileChange).empty,
             .mutex = std.Io.Mutex.init,
+            .io = io,
         };
 
         var context = c.FSEventStreamContext{
@@ -160,13 +160,15 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
     base_path: []const u8,
     state: std.StringHashMap(FileState),
     pending: std.ArrayList(watcher.FileChange),
+    io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator, path: []const u8) !@This() {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !@This() {
         var self = @This(){
             .allocator = allocator,
             .base_path = try allocator.dupe(u8, path),
             .state = std.StringHashMap(FileState).init(allocator),
             .pending = std.ArrayList(watcher.FileChange).empty,
+            .io = io,
         };
         errdefer allocator.free(self.base_path);
         errdefer self.state.deinit();
@@ -184,7 +186,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
     }
 
     fn scanInto(self: *@This(), path: []const u8, out: *std.StringHashMap(FileState)) !void {
-        var dir = std.Io.Dir.cwd().openDir(path, .{ .iterate = true }) catch return;
+        var dir = std.Io.Dir.cwd().openDir(self.io, path, .{ .iterate = true }) catch return;
         defer dir.close();
         var it = dir.iterate();
         while (try it.next()) |entry| {
@@ -192,7 +194,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
             defer self.allocator.free(full);
             const rel = std.mem.trimStart(u8, full[self.base_path.len..], "/");
             if (entry.kind == .file) {
-                const stat = std.Io.Dir.cwd().statFile(full) catch continue;
+                const stat = std.Io.Dir.cwd().statFile(self.io, full, .{}) catch continue;
                 const key = try self.allocator.dupe(u8, rel);
                 try out.put(key, .{ .mtime_ns = stat.mtime });
             } else if (entry.kind == .directory) {

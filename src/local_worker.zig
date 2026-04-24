@@ -16,10 +16,10 @@ pub const LocalSourceSync = struct {
     watcher: Watcher,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, source: *const LocalSource) !LocalSourceSync {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, source: *const LocalSource) !LocalSourceSync {
         return .{
             .source = source,
-            .watcher = try Watcher.init(allocator, source.local_dir),
+            .watcher = try Watcher.init(allocator, io, source.local_dir),
             .allocator = allocator,
         };
     }
@@ -42,7 +42,7 @@ pub const LocalCopyWorker = struct {
         errdefer allocator.free(sources);
 
         for (lw_config.sources, 0..) |*source, i| {
-            sources[i] = try LocalSourceSync.init(allocator, source);
+            sources[i] = try LocalSourceSync.init(allocator, io, source);
         }
 
         return .{

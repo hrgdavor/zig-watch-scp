@@ -2,21 +2,7 @@
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
 const builtin = @import("builtin");
-const c = @cImport({
-    @cDefine("LIBSSH2_STATIC", "1");
-    // Prevent MinGW from enabling fortified (bounds-checking) inline wrappers for wcscat/wcscpy.
-    // These wrappers embed a local `extern wcscat_s` declaration that Zig translate-c emits
-    // as an unused local constant — an error in Zig 0.16.
-    @cUndef("_FORTIFY_SOURCE");
-    @cDefine("_FORTIFY_SOURCE", "0");
-    // Suppress GCC-only builtins that Zig's clang C translator does not understand.
-    // These appear in mingw's io.h when __USE_MINGW_ANSI_STDIO is active.
-    @cDefine("__builtin_va_arg_pack_len()", "0");
-    @cDefine("__builtin_va_arg_pack()", "");
-    @cInclude("libssh2.h");
-    @cInclude("libssh2_sftp.h");
-    @cInclude("socket_compat.h");
-});
+const c = @import("c");
 
 pub const SshSession = struct {
     session: *c.LIBSSH2_SESSION,

@@ -194,7 +194,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("Initial sync completed in {d:.2} seconds.\n\n", .{sync_duration});
 
         // Initialize watcher
-        const watcher_inst = try ssh_worker.Watcher.init(allocator, folder.local_dir);
+        const watcher_inst = try ssh_worker.Watcher.init(allocator, init.io, folder.local_dir);
 
         folder_syncs[i] = .{
             .folder = folder,

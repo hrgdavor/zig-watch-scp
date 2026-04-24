@@ -96,8 +96,9 @@ pub const WindowsWatcher = struct {
     current_offset: usize,
     overlapped: OVERLAPPED,
     io_pending: bool,
+    io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator, path: []const u8) !WindowsWatcher {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !WindowsWatcher {
         const path_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, path);
         defer allocator.free(path_w);
 
@@ -131,6 +132,7 @@ pub const WindowsWatcher = struct {
             .current_offset = 0,
             .overlapped = std.mem.zeroInit(OVERLAPPED, .{ .hEvent = event_handle }),
             .io_pending = false,
+            .io = io,
         };
     }
 

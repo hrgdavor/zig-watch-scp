@@ -3,19 +3,16 @@
 const std = @import("std");
 const watcher = @import("watcher.zig");
 
-const c = @cImport({
-    @cInclude("sys/inotify.h");
-    @cInclude("unistd.h");
-    @cInclude("limits.h");
-});
+const c = @import("c");
 
 pub const LinuxWatcher = struct {
     allocator: std.mem.Allocator,
     inotify_fd: i32,
     watch_descriptors: std.AutoHashMap(i32, []const u8),
     base_path: []const u8,
+    io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator, path: []const u8) !LinuxWatcher {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !LinuxWatcher {
         const inotify_fd = c.inotify_init1(c.IN_NONBLOCK);
         if (inotify_fd < 0) {
             return error.InotifyInitFailed;
@@ -26,6 +23,7 @@ pub const LinuxWatcher = struct {
             .inotify_fd = inotify_fd,
             .watch_descriptors = std.AutoHashMap(i32, []const u8).init(allocator),
             .base_path = try allocator.dupe(u8, path),
+            .io = io,
         };
 
         try self.addWatchRecursive(path);
@@ -44,8 +42,7 @@ pub const LinuxWatcher = struct {
 
     fn addWatchRecursive(self: *LinuxWatcher, path: []const u8) !void {
         try self.addWatch(path);
-
-        const dir = std.Io.Dir.cwd().openDir(path, .{ .iterate = true }) catch return;
+        const dir = std.Io.Dir.cwd().openDir(self.io, path, .{ .iterate = true }) catch return;
         var dir_copy = dir;
         defer dir_copy.close();
 
