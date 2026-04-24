@@ -91,7 +91,8 @@ pub fn build(b: *std.Build) void {
             \\#include <limits.h>
             \\#endif
             \\#ifdef __APPLE__
-            \\#include <CoreServices/CoreServices.h>
+            \\#include <CoreFoundation/CoreFoundation.h>
+            \\#include <FSEvents/FSEvents.h>
             \\#endif
         ),
         .target = target,
