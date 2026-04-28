@@ -135,6 +135,15 @@ pub fn build(b: *std.Build) void {
     stats_exe.root_module.addSystemIncludePath(b.path("src"));
     stats_exe.root_module.addImport("c", c_module);
     stats_exe.root_module.addOptions("build_options", build_opts);
+
+    if (use_coreservices) {
+        stats_exe.root_module.linkFramework("CoreServices", .{});
+        if (b.sysroot) |sysroot| {
+            stats_exe.root_module.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
+            stats_exe.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
+        }
+    }
+
     const install_stats = b.addInstallArtifact(stats_exe, .{
         .dest_dir = .{ .override = .prefix },
     });
