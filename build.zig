@@ -76,7 +76,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addSystemIncludePath(b.path("src"));
 
     const c_translate = b.addTranslateC(.{
-        .root_source_file = b.addWriteFiles().add("c_include.h", 
+        .root_source_file = b.addWriteFiles().add("c_include.h",
             \\#define LIBSSH2_STATIC 1
             \\#undef _FORTIFY_SOURCE
             \\#define _FORTIFY_SOURCE 0
@@ -107,7 +107,7 @@ pub fn build(b: *std.Build) void {
             c_translate.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
         }
     }
-    
+
     const c_module = c_translate.addModule("c");
     exe.root_module.addImport("c", c_module);
 
@@ -134,6 +134,7 @@ pub fn build(b: *std.Build) void {
 
     stats_exe.root_module.addSystemIncludePath(b.path("src"));
     stats_exe.root_module.addImport("c", c_module);
+    stats_exe.root_module.addOptions("build_options", build_opts);
     const install_stats = b.addInstallArtifact(stats_exe, .{
         .dest_dir = .{ .override = .prefix },
     });

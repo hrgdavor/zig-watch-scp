@@ -245,7 +245,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
             if (entry.kind == .file) {
                 const stat = std.Io.Dir.cwd().statFile(self.io, full, .{}) catch continue;
                 const key = try self.allocator.dupe(u8, rel);
-                try out.put(key, .{ .mtime_ns = stat.mtime });
+                try out.put(key, .{ .mtime_ns = stat.mtime.nanoseconds });
             } else if (entry.kind == .directory) {
                 try self.scanInto(full, out);
             }
@@ -305,7 +305,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
     }
 
     pub fn wait(self: *@This(), timeout_ms: u32) !void {
-        std.Thread.sleep(@as(u64, timeout_ms) * std.time.ns_per_ms);
+        try self.io.sleep(.{ .nanoseconds = @as(u64, timeout_ms) * std.time.ns_per_ms }, .real);
         try self.poll();
     }
 };
