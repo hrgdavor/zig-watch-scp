@@ -178,7 +178,8 @@ trigger_to=/tmp/app-reload.trigger
 
 If `trigger_from` is not specified, an empty file will be created at `trigger_to` on the remote server.
 
-### Remote Permissions and ACL Support
+### Remote Permissions and ACL Support 
+> since v1.3.2
 
 By default, the tool uses standard permissions when creating files (`0644`) and directories (`0755`) on the remote server.
 
