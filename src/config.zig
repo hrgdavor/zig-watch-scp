@@ -41,6 +41,8 @@ pub const Config = struct {
     exec_cmd: ?[]const u8,
     watch: bool,
     color: bool,
+    file_mode: u32,
+    dir_mode: u32,
 
     // Standalone create mode
     create_folder: ?[]const u8,
@@ -230,6 +232,8 @@ pub const Config = struct {
             .watch = cli_watch,
             .color = cli_color,
             .exec_cmd = if (cli_exec_cmd) |cmd| try arena_allocator.dupe(u8, cmd) else null,
+            .file_mode = 0o644,
+            .dir_mode = 0o755,
             .text_extensions = try createDefaultTextExtensions(arena_allocator),
             .folders = try arena_allocator.alloc(Folder, 0),
             .local_copy_workers = try arena_allocator.alloc(LocalCopyWorkerConfig, 0),
@@ -608,6 +612,10 @@ pub const Config = struct {
                     if (section == .folder) {
                         cur_trigger_to = try allocator.dupe(u8, value);
                     }
+                } else if (std.mem.eql(u8, key, "file_mode")) {
+                    config.file_mode = try parseMode(value);
+                } else if (std.mem.eql(u8, key, "dir_mode")) {
+                    config.dir_mode = try parseMode(value);
                 }
             }
         }
@@ -625,5 +633,16 @@ pub const Config = struct {
 
         allocator.free(config.local_copy_workers);
         config.local_copy_workers = try local_copy_workers.toOwnedSlice(allocator);
+    }
+
+    fn parseMode(value: []const u8) !u32 {
+        if (value.len == 0) return 0;
+        if (std.mem.startsWith(u8, value, "0o")) {
+            return try std.fmt.parseInt(u32, value[2..], 8);
+        } else if (std.mem.startsWith(u8, value, "0")) {
+            return try std.fmt.parseInt(u32, value, 8);
+        } else {
+            return try std.fmt.parseInt(u32, value, 10);
+        }
     }
 };

@@ -85,7 +85,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Connecting to {s}@{s}...\n", .{ config.username, config.host });
 
     // Connect to SSH
-    var ssh = try SshSession.init(allocator, init.io, config.host, config.username, config.password, config.key_path, config.passphrase, config.compress);
+    var ssh = try SshSession.init(allocator, init.io, config.host, config.username, config.password, config.key_path, config.passphrase, config.compress, config.file_mode, config.dir_mode);
     defer ssh.deinit();
 
     std.debug.print("Connected successfully!\n", .{});

@@ -205,6 +205,8 @@ pub fn uploadWorker(ctx: *WorkContext) void {
         ctx.config.key_path,
         ctx.config.passphrase,
         ctx.config.compress,
+        ctx.config.file_mode,
+        ctx.config.dir_mode,
     ) catch |err| {
         std.debug.print("Worker failed to connect: {s}\n", .{@errorName(err)});
         ctx.mutex.lock(ctx.io) catch {};

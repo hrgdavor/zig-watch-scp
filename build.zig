@@ -123,6 +123,24 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
+    const stats_exe = b.addExecutable(.{
+        .name = "stats",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("statistics.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    stats_exe.root_module.addSystemIncludePath(b.path("src"));
+    const install_stats = b.addInstallArtifact(stats_exe, .{
+        .dest_dir = .{ .override = .prefix },
+    });
+    b.getInstallStep().dependOn(&install_stats.step);
+
+    const stats_step = b.step("stats", "Build the stats executable");
+    stats_step.dependOn(&stats_exe.step);
+
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 }

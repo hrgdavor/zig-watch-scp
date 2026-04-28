@@ -10,6 +10,8 @@ pub const SshSession = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     sftp: ?*c.LIBSSH2_SFTP,
+    file_mode: u32,
+    dir_mode: u32,
 
     pub fn libInit() !void {
         if (builtin.os.tag == .windows) {
@@ -60,6 +62,8 @@ pub const SshSession = struct {
         key_path: []const u8,
         passphrase: []const u8,
         compress: bool,
+        file_mode: u32,
+        dir_mode: u32,
     ) !SshSession {
         // Note: libssh2_init should be called once in main() for thread safety
         // if (c.libssh2_init(0) != 0) {
@@ -137,6 +141,8 @@ pub const SshSession = struct {
                 .allocator = allocator,
                 .io = io,
                 .sftp = null,
+                .file_mode = file_mode,
+                .dir_mode = dir_mode,
             };
         }
 
@@ -232,6 +238,8 @@ pub const SshSession = struct {
                     .allocator = allocator,
                     .io = io,
                     .sftp = null,
+                    .file_mode = file_mode,
+                    .dir_mode = dir_mode,
                 };
             } else {
                 std.debug.print("All key-based authentication failed (final result: {} / 0x{X})\n", .{ auth_result, @as(u32, @bitCast(auth_result)) });
@@ -257,6 +265,8 @@ pub const SshSession = struct {
                             .allocator = allocator,
                             .io = io,
                             .sftp = null,
+                            .file_mode = file_mode,
+                            .dir_mode = dir_mode,
                         };
                     } else {
                         printLastError(session, "Password authentication failed");
@@ -288,6 +298,8 @@ pub const SshSession = struct {
             .allocator = allocator,
             .io = io,
             .sftp = null,
+            .file_mode = file_mode,
+            .dir_mode = dir_mode,
         };
     }
 
@@ -369,7 +381,7 @@ pub const SshSession = struct {
             remote_path_z.ptr,
             @intCast(remote_path.len),
             c.LIBSSH2_FXF_WRITE | c.LIBSSH2_FXF_CREAT | c.LIBSSH2_FXF_TRUNC,
-            0,
+            @intCast(self.file_mode),
             c.LIBSSH2_SFTP_OPENFILE,
         ) orelse return error.RemoteFileOpenFailed;
         defer _ = c.libssh2_sftp_close(remote_file);
@@ -399,7 +411,7 @@ pub const SshSession = struct {
             remote_path_z.ptr,
             @intCast(remote_path.len),
             c.LIBSSH2_FXF_WRITE | c.LIBSSH2_FXF_CREAT | c.LIBSSH2_FXF_TRUNC,
-            0,
+            @intCast(self.file_mode),
             c.LIBSSH2_SFTP_OPENFILE,
         ) orelse {
             const err_code = c.libssh2_sftp_last_error(sftp);
@@ -579,11 +591,14 @@ pub const SshSession = struct {
             const path_z = try self.allocator.dupeZ(u8, current_path.items);
             defer self.allocator.free(path_z);
 
+            // Some SFTP servers treat a mode of 0 as literal 000 permissions when creating
+            // a directory. Use a safe default here so the directory is writable while
+            // still allowing the server's umask/ACLs to restrict access further.
             _ = c.libssh2_sftp_mkdir_ex(
                 sftp,
                 path_z.ptr,
                 @intCast(path_z.len),
-                0,
+                @intCast(self.dir_mode),
             );
         }
     }
