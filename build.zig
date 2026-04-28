@@ -133,6 +133,7 @@ pub fn build(b: *std.Build) void {
     });
 
     stats_exe.root_module.addSystemIncludePath(b.path("src"));
+    stats_exe.root_module.addImport("c", c_module);
     const install_stats = b.addInstallArtifact(stats_exe, .{
         .dest_dir = .{ .override = .prefix },
     });
