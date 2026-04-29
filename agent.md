@@ -34,7 +34,26 @@ Following the Zig 0.16.0 I/O overhaul, I/O is buffered by default.
     try stdout.flush(); 
 ```
 
-## 3. No Unmanaged Arrays
+## 3. Detecting Pipes and Redirects
+To detect whether standard output is a terminal or has been piped/redirected, use `std.fs.File.stdout().isatty()`.
+This works cross-platform in Zig 0.16.0 and is the recommended way to choose terminal-friendly behavior.
+
+```zig
+const std = @import("std");
+
+pub fn main(init: std.process.Init) !void {
+    const stdout = std.fs.File.stdout();
+    const is_terminal = stdout.isatty();
+
+    if (is_terminal) {
+        try init.io.print("Output is a terminal. Colors enabled!\n", .{});
+    } else {
+        try init.io.print("Output is piped or redirected. Stripping colors...\n", .{});
+    }
+}
+```
+
+## 4. No Unmanaged Arrays
 Do not use `std.ArrayListUnmanaged` or other older Unmanaged array variants. The managed vs unmanaged distinction is being simplified in newer Zig versions. Rely on standard types (like `std.ArrayList`) and explicitly pass allocators when required by the API, or initialize standard lists with the allocator directly.
 
 ```zig

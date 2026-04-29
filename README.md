@@ -96,8 +96,10 @@ sync -c sync.conf
 
 - `-c, --config <path>`: Path to configuration file (required for sync mode)
 - `-x, --compress`: Enable SSH compression
+- `--color`: Force ANSI color output even when stdout is not a terminal
 - `--cleanup`: Remove remote files not present locally (matching patterns)
 - `--simple-log`: Use simple logging (no escape codes for progress)
+- `--no-color`: Disable color output
 - `-h, --help`: Show help message
 
 **Examples**:
@@ -105,9 +107,24 @@ sync -c sync.conf
 # Sync with compression and cleanup
 sync -c sync.conf -x --cleanup
 
-# Sync overidding host and credentials
+# Force colored output even into a pipe or file
+sync -c sync.conf --color | sed -n 's/\x1b\[[0-9;]*m//g'
+
+# Disable colors even when running in a terminal
+sync -c sync.conf --no-color
+
+# Sync overriding host and credentials
 sync -c sync.conf myserver.com myuser mypass
 ```
+
+### Color Output Behavior
+The tool uses Zig 0.16.0's `std.fs.File.stdout().isatty()` check to detect whether standard output is a terminal.
+- If stdout is a TTY, ANSI color output is enabled by default.
+- If stdout is piped or redirected, colors are disabled by default to keep the output clean.
+- Use `--color` to force ANSI colors even when piping output intentionally (for example, when generating colored HTML or passing data to another tool).
+- Use `--no-color` to disable colors even when running interactively in a terminal.
+
+> This behavior avoids unwanted escape codes in logs and pipeline output while still allowing explicit color forcing when the user wants it.
 
 ### Standalone Checksum Generation
 You can create a `.scpdb` file locally without connecting to a remote server:

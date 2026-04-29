@@ -74,7 +74,7 @@ pub const Config = struct {
         var cli_watch_delay: ?u64 = null;
         var cli_exec_cmd: ?[]const u8 = null;
         var cli_watch: bool = false;
-        var cli_color: bool = true;
+        var cli_color: ?bool = null;
         var config_path: ?[]const u8 = null;
         var cli_host: ?[]const u8 = null;
         var cli_username: ?[]const u8 = null;
@@ -147,6 +147,8 @@ pub const Config = struct {
                 config_path = raw_args[i];
             } else if (std.mem.eql(u8, arg, "-x") or std.mem.eql(u8, arg, "--compress")) {
                 cli_compress = true;
+            } else if (std.mem.eql(u8, arg, "--color")) {
+                cli_color = true;
             } else if (std.mem.eql(u8, arg, "--no-color")) {
                 cli_color = false;
             } else if (std.mem.eql(u8, arg, "-w") or std.mem.eql(u8, arg, "--watch")) {
@@ -218,6 +220,8 @@ pub const Config = struct {
         }
 
         // ── build Config ──────────────────────────────────────────────────────
+        const stdout_file = std.Io.File.stdout();
+        const resolved_color = if (cli_color) |cli_color_val| cli_color_val else std.Io.File.isTty(stdout_file, init.io) catch false;
         var config = Config{
             .host = if (cli_host) |h| try arena_allocator.dupe(u8, h) else try arena_allocator.dupe(u8, ""),
             .username = if (cli_username) |u| try arena_allocator.dupe(u8, u) else try arena_allocator.dupe(u8, ""),
@@ -230,7 +234,7 @@ pub const Config = struct {
             .simple_log = cli_simple_log,
             .cleanup = cli_cleanup,
             .watch = cli_watch,
-            .color = cli_color,
+            .color = resolved_color,
             .exec_cmd = if (cli_exec_cmd) |cmd| try arena_allocator.dupe(u8, cmd) else null,
             .file_mode = 0o644,
             .dir_mode = 0o755,
@@ -292,6 +296,7 @@ pub const Config = struct {
             \\Flags:
             \\  -c, --config <file>       Path to configuration file
             \\  -x, --compress            Enable SSH compression
+            \\      --color               Force color output even when stdout is piped or redirected
             \\      --simple-log          Simple logging (no escape codes)
             \\      --cleanup             Remove remote files not present locally
             \\      --watch-delay <ms>    Delay before syncing after change (default: 200)
