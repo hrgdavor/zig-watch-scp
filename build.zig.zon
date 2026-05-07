@@ -49,7 +49,8 @@
             .hash = "N-V-__8AAATRLQBu_rNy4X2UK6RtcdYK_yAzkV6OcCqgo5aK",
         },
         .nightwatch = .{
-            .path = "zig-pkg/nightwatch",
+            .url = "https://github.com/neurocyte/nightwatch/archive/refs/heads/master.tar.gz",
+            .hash = "nightwatch-1.0.0-uXzeHzCgAgBNSi0lpwYyPXdiSnZeiExDSiu_XdZO55HI",
         },
     },
     .paths = .{
