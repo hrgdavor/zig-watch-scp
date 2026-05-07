@@ -2,19 +2,13 @@
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
+const common = @import("watcher_common.zig");
 
-pub const FileChange = struct {
-    path: []const u8,
-    kind: ChangeKind,
-};
+pub const FileChange = common.FileChange;
+pub const ChangeKind = common.ChangeKind;
 
-pub const ChangeKind = enum {
-    created,
-    modified,
-    deleted,
-};
-
-pub const Watcher = switch (builtin.os.tag) {
+pub const Watcher = if (build_options.use_nightwatch) @import("watcher_nightwatch.zig").NightwatchWatcher else switch (builtin.os.tag) {
     .linux => @import("watcher_linux.zig").LinuxWatcher,
     .windows => @import("watcher_windows.zig").WindowsWatcher,
     .macos => @import("watcher_macos.zig").MacOsWatcher,

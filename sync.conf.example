@@ -28,6 +28,15 @@ cleanup=false
 # Text file extensions (for line ending normalization)
 # text_extensions=.txt, .md, .zig, .java
 
+# Change detection mode (default: hash)
+# - hash: uses wyhash64 to detect content changes (most accurate)
+# - mtime_size: uses file modification time and size (fastest, lightweight)
+# check=hash
+
+# Disable checksum database (.scpdb) on remote server (default: false)
+# When true, skips downloading/uploading the database and uses direct stat checks.
+# no_db=false
+
 # === Folder Synchronization Pairs ===
 # You must define one or more folder sections. Each section starts with [folder].
 
@@ -49,11 +58,14 @@ local_dir=./docs
 remote_dir=/opt/project/docs
 excludes=**/*.bak, .~*
 
-# After each sync, copy this local file to a remote destination.
-# If trigger_from is not defined, an empty file is created at trigger_to.
-# Used for triggering remote actions/scripts.
 # trigger_from=./trigger.local
 # trigger_to=/tmp/sync-trigger.txt
+
+# Version File Support
+# Reads a local template, replaces ${timestamp} with current epoch, and uploads.
+# Supports .json and .ini property replacement automatically.
+# version_from=version.json.template
+# version_to=version.json
 
 # === Local-only copy workers (no SSH) ===
 # [local-folder] serves as a target directory and expects one or more [source] entries.

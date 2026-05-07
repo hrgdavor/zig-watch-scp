@@ -5,6 +5,7 @@ const std = @import("std");
 pub const DbEntry = struct {
     hash: u64,
     mtime: i64,
+    size: u64,
 };
 
 pub const ChecksumDb = struct {
@@ -31,10 +32,10 @@ pub const ChecksumDb = struct {
         self.entries.clearRetainingCapacity();
     }
 
-    pub fn put(self: *ChecksumDb, path: []const u8, hash: u64, mtime: i64) !void {
+    pub fn put(self: *ChecksumDb, path: []const u8, hash: u64, mtime: i64, size: u64) !void {
         const owned_path = try self.allocator.dupe(u8, path);
         std.mem.replaceScalar(u8, owned_path, '\\', '/');
-        try self.entries.put(owned_path, .{ .hash = hash, .mtime = mtime });
+        try self.entries.put(owned_path, .{ .hash = hash, .mtime = mtime, .size = size });
     }
 
     pub fn get(self: *const ChecksumDb, path: []const u8) ?DbEntry {
@@ -42,7 +43,7 @@ pub const ChecksumDb = struct {
     }
 
     pub fn serialize(self: *const ChecksumDb, writer: anytype) !void {
-        const Entry = struct { path: []const u8, hash: u64, mtime: i64 };
+        const Entry = struct { path: []const u8, hash: u64, mtime: i64, size: u64 };
         var list = std.ArrayList(Entry).empty;
         defer list.deinit(self.allocator);
 
@@ -52,6 +53,7 @@ pub const ChecksumDb = struct {
                 .path = entry.key_ptr.*,
                 .hash = entry.value_ptr.hash,
                 .mtime = entry.value_ptr.mtime,
+                .size = entry.value_ptr.size,
             });
         }
 
@@ -64,7 +66,7 @@ pub const ChecksumDb = struct {
         std.sort.block(Entry, list.items, SortContext{}, SortContext.lessThan);
 
         for (list.items) |entry| {
-            try writer.print("{x:0>16}\t{d}\t{s}\n", .{ entry.hash, entry.mtime, entry.path });
+            try writer.print("{x:0>16}\t{d}\t{d}\t{s}\n", .{ entry.hash, entry.mtime, entry.size, entry.path });
         }
     }
 
@@ -89,10 +91,25 @@ pub const ChecksumDb = struct {
                 corrupted_count += 1;
                 continue;
             };
-            const path = it.next() orelse {
+            const next_part = it.next() orelse {
                 corrupted_count += 1;
                 continue;
             };
+
+            var size: u64 = 0;
+            var path: []const u8 = "";
+
+            if (it.next()) |p| {
+                // We have 4 parts: hash, mtime, size, path
+                size = std.fmt.parseInt(u64, next_part, 10) catch {
+                    corrupted_count += 1;
+                    continue;
+                };
+                path = p;
+            } else {
+                // Backward compatibility: 3 parts: hash, mtime, path
+                path = next_part;
+            }
 
             const hash = std.fmt.parseInt(u64, hash_str, 16) catch {
                 corrupted_count += 1;
@@ -105,7 +122,7 @@ pub const ChecksumDb = struct {
                 continue;
             };
 
-            try db.put(path, hash, mtime);
+            try db.put(path, hash, mtime, size);
         }
 
         if (corrupted_count > 0) {

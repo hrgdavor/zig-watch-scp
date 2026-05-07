@@ -7,6 +7,7 @@ const ChecksumDb = @import("src/checksum_db.zig").ChecksumDb;
 const Scanner = @import("src/scanner.zig").Scanner;
 const ssh_worker = @import("src/ssh_worker.zig");
 const local_worker = @import("src/local_worker.zig");
+const ansi = @import("src/ansi.zig");
 
 pub fn main(init: std.process.Init) !void {
     try SshSession.libInit();
@@ -82,6 +83,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    const printer: ansi.Printer = .{ .color_enabled = config.color };
     std.debug.print("Connecting to {s}@{s}...\n", .{ config.username, config.host });
 
     // Connect to SSH
@@ -134,61 +136,65 @@ pub fn main(init: std.process.Init) !void {
 
         // Setup DB path and load database
         const is_absolute_db = std.fs.path.isAbsolute(folder.scpdb);
-        var db_path: []const u8 = undefined;
+        var db_path: []const u8 = try allocator.dupe(u8, ""); // empty default
         var remote_db = ChecksumDb.init(allocator);
 
-        if (folder.local_db) {
-            db_path = if (is_absolute_db)
-                try allocator.dupe(u8, folder.scpdb)
-            else
-                try std.fs.path.resolve(allocator, &[_][]const u8{ folder.local_dir, folder.scpdb });
+        if (!folder.no_db) {
+            if (folder.local_db) {
+                db_path = if (is_absolute_db)
+                    try allocator.dupe(u8, folder.scpdb)
+                else
+                    try std.fs.path.resolve(allocator, &[_][]const u8{ folder.local_dir, folder.scpdb });
 
-            if (std.Io.Dir.cwd().readFileAlloc(init.io, db_path, allocator, @as(std.Io.Limit, @enumFromInt(10 * 1024 * 1024)))) |content| {
-                defer allocator.free(content);
-                remote_db.deinit();
-                remote_db = try ChecksumDb.deserialize(allocator, content);
-                std.debug.print("Loaded local database: {s} ({} entries)\n", .{ db_path, remote_db.entries.count() });
-            } else |_| {
-                std.debug.print("No local database found at {s}, starting fresh.\n", .{db_path});
-            }
-        } else {
-            const remote_db_path_win = try std.fs.path.join(allocator, &[_][]const u8{ folder.remote_dir, folder.scpdb });
-            defer allocator.free(remote_db_path_win);
-            const mutable_db_path = try allocator.dupe(u8, remote_db_path_win);
-            std.mem.replaceScalar(u8, mutable_db_path, '\\', '/');
-            db_path = mutable_db_path;
-
-            std.debug.print("Downloading remote checksum database from {s}...\n", .{db_path});
-            var random_id: u64 = undefined;
-            init.io.random(std.mem.asBytes(&random_id));
-            var tmp_name: [64]u8 = undefined;
-            const tmp_path = try std.fmt.bufPrint(&tmp_name, ".scpdb.{x}.tmp", .{random_id});
-
-            ssh_worker.ssh_mutex.lock(init.io) catch {};
-            if (ssh.downloadFile(db_path, tmp_path)) |_| {
-                ssh_worker.ssh_mutex.unlock(init.io);
-                if (std.Io.Dir.cwd().readFileAlloc(init.io, tmp_path, allocator, @as(std.Io.Limit, @enumFromInt(10 * 1024 * 1024)))) |content| {
-                    defer std.Io.Dir.cwd().deleteFile(init.io, tmp_path) catch {};
+                if (std.Io.Dir.cwd().readFileAlloc(init.io, db_path, allocator, @as(std.Io.Limit, @enumFromInt(10 * 1024 * 1024)))) |content| {
                     defer allocator.free(content);
                     remote_db.deinit();
                     remote_db = try ChecksumDb.deserialize(allocator, content);
-                    std.debug.print("Loaded remote database with {} entries.\n", .{remote_db.entries.count()});
-                } else |_| {}
-            } else |err| {
-                ssh_worker.ssh_mutex.unlock(init.io);
-                if (err == error.RemoteFileOpenFailed) {
-                    std.debug.print("No remote database found, starting fresh sync.\n", .{});
-                } else {
-                    remote_db.deinit();
-                    allocator.free(db_path);
-                    return err;
+                    std.debug.print("Loaded local database: {s} ({} entries)\n", .{ db_path, remote_db.entries.count() });
+                } else |_| {
+                    std.debug.print("No local database found at {s}, starting fresh.\n", .{db_path});
+                }
+            } else {
+                const remote_db_path_win = try std.fs.path.join(allocator, &[_][]const u8{ folder.remote_dir, folder.scpdb });
+                defer allocator.free(remote_db_path_win);
+                const mutable_db_path = try allocator.dupe(u8, remote_db_path_win);
+                std.mem.replaceScalar(u8, mutable_db_path, '\\', '/');
+                db_path = mutable_db_path;
+
+                std.debug.print("Downloading remote checksum database from {s}...\n", .{db_path});
+                var random_id: u64 = undefined;
+                init.io.random(std.mem.asBytes(&random_id));
+                var tmp_name: [64]u8 = undefined;
+                const tmp_path = try std.fmt.bufPrint(&tmp_name, ".scpdb.{x}.tmp", .{random_id});
+
+                ssh_worker.ssh_mutex.lock(init.io) catch {};
+                if (ssh.downloadFile(db_path, tmp_path)) |_| {
+                    ssh_worker.ssh_mutex.unlock(init.io);
+                    if (std.Io.Dir.cwd().readFileAlloc(init.io, tmp_path, allocator, @as(std.Io.Limit, @enumFromInt(10 * 1024 * 1024)))) |content| {
+                        defer std.Io.Dir.cwd().deleteFile(init.io, tmp_path) catch {};
+                        defer allocator.free(content);
+                        remote_db.deinit();
+                        remote_db = try ChecksumDb.deserialize(allocator, content);
+                        std.debug.print("Loaded remote database with {} entries.\n", .{remote_db.entries.count()});
+                    } else |_| {}
+                } else |err| {
+                    ssh_worker.ssh_mutex.unlock(init.io);
+                    if (err == error.RemoteFileOpenFailed) {
+                        std.debug.print("No remote database found, starting fresh sync.\n", .{});
+                    } else {
+                        remote_db.deinit();
+                        allocator.free(db_path);
+                        return err;
+                    }
                 }
             }
+        } else {
+            std.debug.print("Skipping database (no_db mode enabled).\n", .{});
         }
 
         // Perform initial sync with timing
         const t0 = std.Io.Timestamp.now(init.io, .boot);
-        try ssh_worker.performInitialSync(allocator, init.io, &config, folder, &ssh, &remote_db, db_path);
+        try ssh_worker.performInitialSync(allocator, init.io, &config, folder, &ssh, &remote_db, db_path, printer);
         const elapsed_ns = t0.durationTo(std.Io.Timestamp.now(init.io, .boot)).nanoseconds;
         const sync_duration = @as(f64, @floatFromInt(@as(i64, @intCast(elapsed_ns)))) / @as(f64, @floatFromInt(std.time.ns_per_s));
         std.debug.print("Initial sync completed in {d:.2} seconds.\n\n", .{sync_duration});
@@ -215,7 +221,7 @@ pub fn main(init: std.process.Init) !void {
         defer allocator.free(threads);
 
         for (folder_syncs, 0..) |*fs, i| {
-            threads[i] = try std.Thread.spawn(.{}, ssh_worker.watchFolderThread, .{ allocator, init.io, &config, &ssh, fs });
+            threads[i] = try std.Thread.spawn(.{}, ssh_worker.watchFolderThread, .{ allocator, init.io, &config, &ssh, fs, printer });
         }
 
         for (local_workers, 0..) |*lw, i| {
@@ -243,6 +249,8 @@ fn handleCreateDb(allocator: std.mem.Allocator, io: anytype, config: *const Conf
         .exclude_patterns = config.create_excludes,
         .trigger_from = null,
         .trigger_to = null,
+        .version_from = null,
+        .version_to = null,
     };
 
     // Scan directory
@@ -257,7 +265,7 @@ fn handleCreateDb(allocator: std.mem.Allocator, io: anytype, config: *const Conf
     defer db.deinit();
 
     for (scanner.files.items) |entry| {
-        try db.put(entry.path, entry.checksum, entry.mtime);
+        try db.put(entry.path, entry.checksum, entry.mtime, entry.size);
     }
 
     // Save database

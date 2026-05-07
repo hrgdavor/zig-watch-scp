@@ -12,6 +12,7 @@ pub const SshSession = struct {
     sftp: ?*c.LIBSSH2_SFTP,
     file_mode: u32,
     dir_mode: u32,
+    pub const FileInfo = struct { size: u64, mtime: i64 };
 
     pub fn libInit() !void {
         if (builtin.os.tag == .windows) {
@@ -356,6 +357,27 @@ pub const SshSession = struct {
             try local_writer.interface.writeAll(buffer[0..@intCast(bytes_read)]);
         }
         try local_writer.interface.flush();
+    }
+
+    /// Get remote file information (size and mtime)
+    pub fn getFileInfo(self: *SshSession, path: []const u8) !?FileInfo {
+        const sftp = try self.getSftp();
+        const path_z = try self.allocator.dupeZ(u8, path);
+        defer self.allocator.free(path_z);
+
+        var attrs: c.LIBSSH2_SFTP_ATTRIBUTES = undefined;
+        if (c.libssh2_sftp_stat_ex(sftp, path_z.ptr, @intCast(path.len), c.LIBSSH2_SFTP_STAT, &attrs) != 0) {
+            return null;
+        }
+
+        var res = FileInfo{ .size = 0, .mtime = 0 };
+        if ((attrs.flags & c.LIBSSH2_SFTP_ATTR_SIZE) != 0) {
+            res.size = attrs.filesize;
+        }
+        if ((attrs.flags & c.LIBSSH2_SFTP_ATTR_ACMODTIME) != 0) {
+            res.mtime = @intCast(attrs.mtime);
+        }
+        return res;
     }
 
     /// Upload a file to remote server
