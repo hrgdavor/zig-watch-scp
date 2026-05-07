@@ -54,9 +54,17 @@ pub fn build(b: *std.Build) void {
     }
 
     const build_opts = b.addOptions();
+    const use_nightwatch = b.option(bool, "use_nightwatch", "Enable Nightwatch backend") orelse false;
     const use_coreservices = target.result.os.tag == .macos and builtin.os.tag == .macos;
+    build_opts.addOption(bool, "use_nightwatch", use_nightwatch);
     build_opts.addOption(bool, "use_coreservices", use_coreservices);
     exe.root_module.addOptions("build_options", build_opts);
+
+    const nightwatch_dep = b.dependency("nightwatch", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("nightwatch", nightwatch_dep.module("nightwatch"));
 
     if (use_coreservices) {
         exe.root_module.linkFramework("CoreServices", .{});
@@ -135,6 +143,7 @@ pub fn build(b: *std.Build) void {
     stats_exe.root_module.addSystemIncludePath(b.path("src"));
     stats_exe.root_module.addImport("c", c_module);
     stats_exe.root_module.addOptions("build_options", build_opts);
+    stats_exe.root_module.addImport("nightwatch", nightwatch_dep.module("nightwatch"));
 
     if (use_coreservices) {
         stats_exe.root_module.linkFramework("CoreServices", .{});

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-GPL-3.0-with-Commons-Clause
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
-const watcher = @import("watcher.zig");
+const watcher_common = @import("watcher_common.zig");
 const bopts = @import("build_options");
 
 // Only compile CoreServices C headers when building natively on macOS.
@@ -63,7 +63,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
     base_path: []const u8,
     stream: FSEventStreamRef,
     run_loop: CFRunLoopRef,
-    event_queue: std.ArrayList(watcher.FileChange),
+    event_queue: std.ArrayList(watcher_common.FileChange),
     mutex: std.Io.Mutex,
     io: std.Io,
 
@@ -88,7 +88,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
             .base_path = try allocator.dupe(u8, path),
             .stream = undefined,
             .run_loop = undefined,
-            .event_queue = std.ArrayList(watcher.FileChange).empty,
+            .event_queue = std.ArrayList(watcher_common.FileChange).empty,
             .mutex = std.Io.Mutex.init,
             .io = io,
         };
@@ -160,7 +160,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
 
             const rel_path_trimmed = std.mem.trimStart(u8, rel_path, "/");
 
-            const kind: watcher.ChangeKind = if (flags & kFSEventStreamEventFlagItemCreated != 0)
+            const kind: watcher_common.ChangeKind = if (flags & kFSEventStreamEventFlagItemCreated != 0)
                 .created
             else if (flags & kFSEventStreamEventFlagItemRemoved != 0)
                 .deleted
@@ -183,7 +183,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
         }
     }
 
-    pub fn nextEvent(self: *@This()) !?watcher.FileChange {
+    pub fn nextEvent(self: *@This()) !?watcher_common.FileChange {
         _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, 1);
 
         try self.mutex.lock(self.io);
@@ -208,7 +208,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
     allocator: std.mem.Allocator,
     base_path: []const u8,
     state: std.StringHashMap(FileState),
-    pending: std.ArrayList(watcher.FileChange),
+    pending: std.ArrayList(watcher_common.FileChange),
     io: std.Io,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !@This() {
@@ -216,7 +216,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
             .allocator = allocator,
             .base_path = try allocator.dupe(u8, path),
             .state = std.StringHashMap(FileState).init(allocator),
-            .pending = std.ArrayList(watcher.FileChange).empty,
+            .pending = std.ArrayList(watcher_common.FileChange).empty,
             .io = io,
         };
         errdefer allocator.free(self.base_path);
@@ -298,7 +298,7 @@ pub const MacOsWatcher = if (bopts.use_coreservices) struct {
         self.state = new_state;
     }
 
-    pub fn nextEvent(self: *@This()) anyerror!?watcher.FileChange {
+    pub fn nextEvent(self: *@This()) anyerror!?watcher_common.FileChange {
         if (self.pending.items.len == 0) try self.poll();
         if (self.pending.items.len > 0) return self.pending.orderedRemove(0);
         return null;

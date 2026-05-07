@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-GPL-3.0-with-Commons-Clause
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
-const watcher = @import("watcher.zig");
+const watcher_common = @import("watcher_common.zig");
 
 const c = @import("c");
 
@@ -70,7 +70,7 @@ pub const LinuxWatcher = struct {
         try self.watch_descriptors.put(wd, owned_path);
     }
 
-    pub fn nextEvent(self: *LinuxWatcher) !?watcher.FileChange {
+    pub fn nextEvent(self: *LinuxWatcher) !?watcher_common.FileChange {
         var buffer: [4096]u8 align(@alignOf(c.inotify_event)) = undefined;
 
         const len = c.read(self.inotify_fd, &buffer, buffer.len);
@@ -106,7 +106,7 @@ pub const LinuxWatcher = struct {
             const rel_path_trimmed = std.mem.trimStart(u8, rel_path, "/\\");
             const owned_rel_path = try self.allocator.dupe(u8, rel_path_trimmed);
 
-            const kind: watcher.ChangeKind = if (event.mask & c.IN_CREATE != 0 or event.mask & c.IN_MOVED_TO != 0)
+            const kind: watcher_common.ChangeKind = if (event.mask & c.IN_CREATE != 0 or event.mask & c.IN_MOVED_TO != 0)
                 .created
             else if (event.mask & c.IN_MODIFY != 0)
                 .modified
@@ -120,7 +120,7 @@ pub const LinuxWatcher = struct {
                 self.addWatchRecursive(full_path) catch {};
             }
 
-            return watcher.FileChange{
+            return watcher_common.FileChange{
                 .path = owned_rel_path,
                 .kind = kind,
             };

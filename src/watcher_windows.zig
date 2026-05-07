@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-GPL-3.0-with-Commons-Clause
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
-const watcher = @import("watcher.zig");
+const watcher_common = @import("watcher_common.zig");
 const windows = std.os.windows;
 
 // Windows constants removed from std.os.windows in Zig 0.16
@@ -176,7 +176,7 @@ pub const WindowsWatcher = struct {
         self.io_pending = true;
     }
 
-    pub fn nextEvent(self: *WindowsWatcher) anyerror!?watcher.FileChange {
+    pub fn nextEvent(self: *WindowsWatcher) anyerror!?watcher_common.FileChange {
         // If we have buffered events, process them first
         if (self.current_offset < self.bytes_returned) {
             return try self.processNextBufferedEvent();
@@ -210,7 +210,7 @@ pub const WindowsWatcher = struct {
         return try self.processNextBufferedEvent();
     }
 
-    fn processNextBufferedEvent(self: *WindowsWatcher) anyerror!?watcher.FileChange {
+    fn processNextBufferedEvent(self: *WindowsWatcher) anyerror!?watcher_common.FileChange {
         if (self.current_offset >= self.bytes_returned) {
             try self.startRead();
             return null;
@@ -227,7 +227,7 @@ pub const WindowsWatcher = struct {
             if (c.* == '\\') c.* = '/';
         }
 
-        const kind: watcher.ChangeKind = switch (info.Action) {
+        const kind: watcher_common.ChangeKind = switch (info.Action) {
             FILE_ACTION_ADDED, FILE_ACTION_RENAMED_NEW_NAME => .created,
             FILE_ACTION_MODIFIED => .modified,
             FILE_ACTION_REMOVED, FILE_ACTION_RENAMED_OLD_NAME => .deleted,
@@ -248,7 +248,7 @@ pub const WindowsWatcher = struct {
             self.current_offset += info.NextEntryOffset;
         }
 
-        return watcher.FileChange{
+        return watcher_common.FileChange{
             .path = filename,
             .kind = kind,
         };

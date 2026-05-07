@@ -10,6 +10,7 @@ pub const FileEntry = struct {
     path: []const u8,
     checksum: u64,
     mtime: i64,
+    size: u64,
     is_text: bool,
 };
 
@@ -235,6 +236,7 @@ pub const Scanner = struct {
             .path = owned_path,
             .checksum = checksum,
             .mtime = mtime,
+            .size = stat.size,
             .is_text = is_text,
         });
     }
@@ -244,12 +246,24 @@ pub const Scanner = struct {
 
         for (self.files.items) |entry| {
             const remote_entry = remote_db.get(entry.path);
-            if (remote_entry == null or remote_entry.?.hash != entry.checksum) {
+            var is_changed = false;
+            if (remote_entry) |re| {
+                if (self.folder.check == .mtime_size) {
+                    is_changed = (re.mtime != entry.mtime or re.size != entry.size);
+                } else {
+                    is_changed = (re.hash != entry.checksum);
+                }
+            } else {
+                is_changed = true;
+            }
+
+            if (is_changed) {
                 const path_copy = try self.allocator.dupe(u8, entry.path);
                 try changed.append(self.allocator, .{
                     .path = path_copy,
                     .checksum = entry.checksum,
                     .mtime = entry.mtime,
+                    .size = entry.size,
                     .is_text = entry.is_text,
                 });
             }

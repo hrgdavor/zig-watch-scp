@@ -8,8 +8,7 @@ pub const Watcher = @import("watcher.zig").Watcher;
 const Scanner = @import("scanner.zig").Scanner;
 const ChecksumDb = @import("checksum_db.zig").ChecksumDb;
 const checksum_utils = @import("checksum_db.zig");
-const ANSI_YELLOW = "\x1b[33m";
-const ANSI_RESET = "\x1b[0m";
+const ansi = @import("ansi.zig");
 
 pub const LocalSourceSync = struct {
     source: *const LocalSource,
@@ -36,6 +35,7 @@ pub const LocalCopyWorker = struct {
     lw_config: *const LocalCopyWorkerConfig,
     source_syncs: []LocalSourceSync,
     checksum_db: ChecksumDb,
+    printer: ansi.Printer,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, config: *const Config, lw_config: *const LocalCopyWorkerConfig) !LocalCopyWorker {
         var sources = try allocator.alloc(LocalSourceSync, lw_config.sources.len);
@@ -52,6 +52,7 @@ pub const LocalCopyWorker = struct {
             .lw_config = lw_config,
             .source_syncs = sources,
             .checksum_db = ChecksumDb.init(allocator),
+            .printer = .{ .color_enabled = config.color },
         };
     }
 
@@ -110,7 +111,7 @@ pub const LocalCopyWorker = struct {
                     if (!skip) {
                         try self.copyFile(source.local_dir, entry.path);
                     }
-                    try self.checksum_db.put(entry.path, hash, mtime);
+                    try self.checksum_db.put(entry.path, hash, mtime, stat.size);
                 }
             }
         }
@@ -144,11 +145,7 @@ pub const LocalCopyWorker = struct {
 
         // Copy file
         try std.Io.Dir.cwd().copyFile(full_source, std.Io.Dir.cwd(), full_dest, self.io, .{});
-        if (self.config.color) {
-            std.debug.print(ANSI_YELLOW ++ "  Copied: {s}" ++ ANSI_RESET ++ "\n", .{rel_path});
-        } else {
-            std.debug.print("  Copied: {s}\n", .{rel_path});
-        }
+        self.printer.printc(.yellow, "  Copied: {s}\n", .{rel_path});
     }
 };
 
@@ -272,7 +269,7 @@ pub fn watchLocalCopyThread(lw: *LocalCopyWorker) void {
                             std.debug.print("Error copying {s}: {}\n", .{ rel_path, err });
                         };
                     }
-                    lw.checksum_db.put(rel_path, hash, mtime) catch {};
+                    lw.checksum_db.put(rel_path, hash, mtime, stat.size) catch {};
                     break;
                 }
             }

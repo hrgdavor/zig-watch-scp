@@ -20,8 +20,10 @@ A cross-platform file synchronization tool written in Zig 0.16 that uses SSH/SCP
 - **Granular Pattern Matching**: Individual include/exclude patterns for each folder pair
 - **Remote Cleanup**: Optional `--cleanup` flag to remove files on the remote server that are not present locally (respects include/exclude patterns)
 - **Sync Trigger**: Copy a specific local file to the remote (or create an empty one) after each synchronization. Useful for triggering remote scripts or CI/CD pipelines in restricted environments.
+- **Version File Support**: Automatically updates a version file (JSON or INI) with the current timestamp and uploads it to the remote server.
 - **Colored lines** for copied files
 - **SSH Agent Support**: Compatible with [KeePassXC](https://keepassxc.org/) and other SSH agents for secure, passphrase-free authentication.
+- **Lightweight Sync Options**: Choose between content hashing or file attribute checks (`mtime` + `size`). Optionally disable the remote database entirely for simple sync tasks.
 
 ## Usage
 
@@ -100,6 +102,8 @@ sync -c sync.conf
 - `--cleanup`: Remove remote files not present locally (matching patterns)
 - `--simple-log`: Use simple logging (no escape codes for progress)
 - `--no-color`: Disable color output
+- `--check <hash|mtime_size>`: Change detection mode (default: hash)
+- `--no-db`: Disable checksum database (.scpdb) on remote server
 - `-h, --help`: Show help message
 
 **Examples**:
@@ -178,22 +182,58 @@ For enhanced security and convenience, it is highly recommended to use an SSH Ag
 
 On Windows, ensure the `OpenSSH Authentication Agent` service is running and configured correctly in KeePassXC (typically via a named pipe).
 
-### Sync Trigger
+### Lightweight Sync Modes
 
-A "Sync Trigger" allows you to copy a specific local file (or create an empty one) to the remote server after every synchronization event (both initial and on-change). This is useful for triggering remote scripts, reloaders, or CI/CD pipelines that monitor a specific "signal" file.
+For performance-critical environments or simple use cases, you can customize the change detection strategy:
+
+- **Check Mode (`check`)**:
+    - `hash` (Default): Uses Wyhash64 for absolute content accuracy.
+    - `mtime_size`: Uses file modification time and size. Much faster as it avoids reading file content.
+- **No-DB Mode (`no_db`)**:
+    - Disables the use of the `.scpdb` file on the remote server.
+    - The tool performs direct SFTP `stat` calls to decide if an upload is necessary.
+    - Ideal for syncing single files or small projects without metadata overhead.
+
+**Example Config**:
+```ini
+[folder]
+local_dir=./assets
+remote_dir=/var/www/assets
+check=mtime_size
+no_db=true
+```
+
+If `trigger_from` is not specified, an empty file will be created at `trigger_to` on the remote server.
+
+### Version File Support
+
+The "Version File Support" allows you to maintain a "heartbeat" or version indicator on the remote server that is updated every time a sync occurs. This is useful for remote systems to detect when new content is available without polling the entire filesystem.
+
+**How it works**:
+1. The tool reads a local template file (`version_from`).
+2. It replaces placeholders (like `${timestamp}`) or specific properties (for `.json` and `.ini`) with the current epoch timestamp (in seconds).
+3. The processed file is uploaded to the remote path (`version_to`).
 
 **Configuration**:
 ```ini
 [folder]
 local_dir=./src
 remote_dir=/opt/app/src
-# (Optional) Local file to copy to the remote
-trigger_from=./trigger.signal
-# (Required) Remote path where the trigger file will be written
-trigger_to=/tmp/app-reload.trigger
+# Local template file
+version_from=./version.json.template
+# Remote destination path
+version_to=/opt/app/version.json
 ```
 
-If `trigger_from` is not specified, an empty file will be created at `trigger_to` on the remote server.
+**JSON Template (`version.json.template`)**:
+```json
+{
+  "version": "1.0.0",
+  "sync_time": ${timestamp}
+}
+```
+
+The tool also automatically detects `.json` and `.ini` extensions and can update a `timestamp` property even without a placeholder.
 
 ### Remote Permissions and ACL Support 
 > since v1.3.2
@@ -226,11 +266,11 @@ The tool supports modern glob patterns for both `includes` and `excludes`:
 ## How It Works
 
 1. **Initial Sync**:
-   - Downloads `.scpdb` checksum database for each remote folder (if exists)
-   - Scans local directories using parallel threads
-   - Calculates Wyhash checksums (with CRLF normalization for text files)
-   - Uploads only changed/new files
-   - **Prunes .scpdb**: Removes entries for files that no longer exist locally
+    - Downloads `.scpdb` checksum database for each remote folder (if exists and `no_db=false`)
+    - Scans local directories using parallel threads
+    - Detects changes using Wyhash checksums or file attributes (`mtime`+`size`)
+    - Uploads only changed/new files
+    - **Prunes .scpdb**: Removes entries for files that no longer exist locally
 
 2. **Initial Cleanup (Optional)**:
    - If `--cleanup` is enabled, lists all remote files

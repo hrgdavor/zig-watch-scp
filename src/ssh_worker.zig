@@ -9,8 +9,7 @@ const Scanner = @import("scanner.zig").Scanner;
 const FileEntry = @import("scanner.zig").FileEntry;
 pub const Watcher = @import("watcher.zig").Watcher;
 const checksum_db = @import("checksum_db.zig");
-const ANSI_YELLOW = "\x1b[33m";
-const ANSI_RESET = "\x1b[0m";
+const ansi = @import("ansi.zig");
 
 pub var ssh_mutex = std.Io.Mutex.init;
 
@@ -29,6 +28,7 @@ pub fn performInitialSync(
     ssh: *SshSession,
     remote_db: *ChecksumDb,
     remote_db_path: []const u8,
+    printer: ansi.Printer,
 ) !void {
     std.debug.print("Scanning local directory: {s}\n", .{folder.local_dir});
     var scanner = Scanner.init(allocator, io, config, folder);
@@ -59,12 +59,8 @@ pub fn performInitialSync(
         for (changed_files.items, 1..) |entry, i| {
             std.debug.print("[{}/{}] Syncing: {s}\n", .{ i, changed_files.items.len, entry.path });
             try syncFile(allocator, config, folder, ssh, entry.path);
-            try remote_db.put(entry.path, entry.checksum, entry.mtime);
-            if (config.color) {
-                std.debug.print(ANSI_YELLOW ++ "[{}/{}] Synced: {s}" ++ ANSI_RESET ++ "\n", .{ i, changed_files.items.len, entry.path });
-            } else {
-                std.debug.print("[{}/{}] Synced: {s}\n", .{ i, changed_files.items.len, entry.path });
-            }
+            try remote_db.put(entry.path, entry.checksum, entry.mtime, entry.size);
+            printer.printc(.yellow, "[{}/{}] Synced: {s}\n", .{ i, changed_files.items.len, entry.path });
         }
     } else {
         // Multi-threaded mode
@@ -81,6 +77,7 @@ pub fn performInitialSync(
             .total = changed_files.items.len,
             .mutex = std.Io.Mutex.init,
             .has_error = false,
+            .printer = printer,
         };
 
         const threads = try allocator.alloc(std.Thread, num_threads);
@@ -102,7 +99,7 @@ pub fn performInitialSync(
     // Prune database: re-populate with only current local files
     remote_db.clear();
     for (scanner.files.items) |entry| {
-        try remote_db.put(entry.path, entry.checksum, entry.mtime);
+        try remote_db.put(entry.path, entry.checksum, entry.mtime, entry.size);
     }
 
     // Save updated database
@@ -128,6 +125,7 @@ pub fn performInitialSync(
     }
 
     try performSyncTrigger(allocator, config, folder, ssh);
+    try performVersionFileUpload(allocator, io, config, folder, ssh);
 
     std.debug.print("Initial sync complete for {s}!\n", .{folder.local_dir});
 }
@@ -189,6 +187,7 @@ pub const WorkContext = struct {
     total: usize,
     mutex: std.Io.Mutex,
     has_error: bool,
+    printer: ansi.Printer,
 };
 
 pub fn uploadWorker(ctx: *WorkContext) void {
@@ -242,16 +241,12 @@ pub fn uploadWorker(ctx: *WorkContext) void {
         // Update progress AND database (thread-safe)
         ctx.mutex.lock(ctx.io) catch {};
         ctx.completed += 1;
-        ctx.remote_db.put(entry.path, entry.checksum, entry.mtime) catch {};
+        ctx.remote_db.put(entry.path, entry.checksum, entry.mtime, entry.size) catch {};
         const completed = ctx.completed;
         const total = ctx.total;
         ctx.mutex.unlock(ctx.io);
 
-        if (ctx.config.color) {
-            std.debug.print(ANSI_YELLOW ++ "[{}/{}] Synced: {s}" ++ ANSI_RESET ++ "\n", .{ completed, total, entry.path });
-        } else {
-            std.debug.print("[{}/{}] Synced: {s}\n", .{ completed, total, entry.path });
-        }
+        ctx.printer.printc(.yellow, "[{}/{}] Synced: {s}\n", .{ completed, total, entry.path });
     }
 }
 
@@ -291,6 +286,7 @@ pub fn watchFolderThread(
     config: *const Config,
     ssh: *SshSession,
     fs: *FolderSync,
+    printer: ansi.Printer,
 ) void {
     var pending_syncs = std.StringHashMap(i64).init(allocator);
     defer {
@@ -347,7 +343,7 @@ pub fn watchFolderThread(
         for (ready_paths.items) |rel_path| {
             _ = pending_syncs.remove(rel_path);
 
-            processReadySync(allocator, io, config, ssh, fs, rel_path) catch |err| {
+            processReadySync(allocator, io, config, ssh, fs, rel_path, printer) catch |err| {
                 std.debug.print("Error syncing {s}: {}\n", .{ rel_path, err });
             };
 
@@ -364,6 +360,7 @@ pub fn processReadySync(
     ssh: *SshSession,
     fs: *FolderSync,
     rel_path: []const u8,
+    printer: ansi.Printer,
 ) !void {
     const local_path = try std.fs.path.join(allocator, &[_][]const u8{ fs.folder.local_dir, rel_path });
     defer allocator.free(local_path);
@@ -386,15 +383,45 @@ pub fn processReadySync(
     }
     const mtime: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_ms));
 
-    const is_text = checksum_db.isTextFile(rel_path, config.text_extensions);
-    const checksum = try checksum_db.calculateFileChecksum(allocator, io, local_path, is_text);
-
     // Check if actually changed
-    if (fs.remote_db.get(rel_path)) |old_entry| {
-        if (old_entry.hash == checksum) {
-            std.debug.print("[{s}] No content change: {s}\n", .{ fs.folder.local_dir, rel_path });
-            return;
+    var is_changed = true;
+    const is_text = checksum_db.isTextFile(rel_path, config.text_extensions);
+    var checksum: u64 = 0;
+
+    if (fs.folder.no_db) {
+        if (try ssh.getFileInfo(rel_path)) |remote_info| {
+            if (fs.folder.check == .mtime_size) {
+                is_changed = (remote_info.mtime != mtime or remote_info.size != stat.size);
+            } else {
+                checksum = try checksum_db.calculateFileChecksum(allocator, io, local_path, is_text);
+                // We don't have the remote hash easily without DB, so if check=hash and no_db,
+                // we might have to assume it's changed or we need a way to store just the hash.
+                // But the user said for no_db, mtime_size is preferable.
+                // If they insist on hash check without DB, we'd have to download the remote file
+                // and hash it, which is slow.
+                // For now, let's assume if no_db and check=hash, we always upload
+                // OR we just use mtime_size as fallback.
+                is_changed = true;
+            }
         }
+    } else {
+        if (fs.remote_db.get(rel_path)) |old_entry| {
+            if (fs.folder.check == .mtime_size) {
+                is_changed = (old_entry.mtime != mtime or old_entry.size != stat.size);
+            } else {
+                checksum = try checksum_db.calculateFileChecksum(allocator, io, local_path, is_text);
+                is_changed = (old_entry.hash != checksum);
+            }
+        }
+    }
+
+    if (!is_changed) {
+        std.debug.print("[{s}] No change detected: {s}\n", .{ fs.folder.local_dir, rel_path });
+        return;
+    }
+
+    if (checksum == 0 and fs.folder.check == .hash) {
+        checksum = try checksum_db.calculateFileChecksum(allocator, io, local_path, is_text);
     }
 
     std.debug.print("[{s}] Uploading: {s}\n", .{ fs.folder.local_dir, rel_path });
@@ -404,8 +431,10 @@ pub fn processReadySync(
 
     try syncFile(allocator, config, fs.folder, ssh, rel_path);
 
-    try fs.remote_db.put(rel_path, checksum, mtime);
-    try saveDatabase(allocator, io, config, fs.folder, &fs.remote_db, ssh, fs.remote_db_path);
+    if (!fs.folder.no_db) {
+        try fs.remote_db.put(rel_path, checksum, mtime, stat.size);
+        try saveDatabase(allocator, io, config, fs.folder, &fs.remote_db, ssh, fs.remote_db_path);
+    }
 
     if (config.exec_cmd) |cmd| {
         std.debug.print("[{s}] Executing remote command: {s}\n", .{ fs.folder.local_dir, cmd });
@@ -415,12 +444,9 @@ pub fn processReadySync(
     }
 
     try performSyncTrigger(allocator, config, fs.folder, ssh);
+    try performVersionFileUpload(allocator, io, config, fs.folder, ssh);
 
-    if (config.color) {
-        std.debug.print(ANSI_YELLOW ++ "[{s}] Synced: {s}" ++ ANSI_RESET ++ "\n\n", .{ fs.folder.local_dir, rel_path });
-    } else {
-        std.debug.print("[{s}] Synced: {s}\n\n", .{ fs.folder.local_dir, rel_path });
-    }
+    printer.printc(.yellow, "[{s}] Synced: {s}\n\n", .{ fs.folder.local_dir, rel_path });
 }
 
 pub fn shouldSyncFile(path: []const u8, folder: *const Folder) bool {
@@ -456,6 +482,86 @@ pub fn performSyncTrigger(
             std.debug.print("Warning: Failed to write empty trigger file: {s}\n", .{@errorName(err)});
         };
     }
+}
+
+pub fn performVersionFileUpload(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    config: *const Config,
+    folder: *const Folder,
+    ssh: *SshSession,
+) !void {
+    const version_from = folder.version_from orelse return;
+    const version_to = folder.version_to orelse return;
+
+    const template_content = std.Io.Dir.cwd().readFileAlloc(io, version_from, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024))) catch |err| {
+        std.debug.print("Warning: Failed to read version template {s}: {s}\n", .{ version_from, @errorName(err) });
+        return;
+    };
+    defer allocator.free(template_content);
+
+    const now_secs = @divTrunc(std.Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s);
+    var ts_buf: [32]u8 = undefined;
+    const ts_str = try std.fmt.bufPrint(&ts_buf, "{}", .{now_secs});
+
+    var result = std.ArrayList(u8).empty;
+    defer result.deinit(allocator);
+
+    const is_json = std.mem.endsWith(u8, version_from, ".json");
+    const is_ini = std.mem.endsWith(u8, version_from, ".ini");
+
+    var i: usize = 0;
+    while (i < template_content.len) {
+        if (std.mem.startsWith(u8, template_content[i..], "${timestamp}")) {
+            try result.appendSlice(allocator, ts_str);
+            i += "${timestamp}".len;
+            continue;
+        }
+
+        if (is_json and std.mem.startsWith(u8, template_content[i..], "\"timestamp\"")) {
+            try result.appendSlice(allocator, "\"timestamp\"");
+            i += "\"timestamp\"".len;
+            // Skip whitespaces and colon
+            while (i < template_content.len and (std.ascii.isWhitespace(template_content[i]) or template_content[i] == ':')) {
+                try result.append(allocator, template_content[i]);
+                i += 1;
+            }
+            // Skip digits of the old timestamp
+            while (i < template_content.len and std.ascii.isDigit(template_content[i])) {
+                i += 1;
+            }
+            try result.appendSlice(allocator, ts_str);
+            continue;
+        }
+
+        if (is_ini and std.mem.startsWith(u8, template_content[i..], "timestamp")) {
+            // Check if it's the start of a line or after a newline
+            const is_start = (i == 0 or template_content[i - 1] == '\n');
+            if (is_start) {
+                try result.appendSlice(allocator, "timestamp");
+                i += "timestamp".len;
+                // Skip whitespaces and equals
+                while (i < template_content.len and (std.ascii.isWhitespace(template_content[i]) or template_content[i] == '=')) {
+                    try result.append(allocator, template_content[i]);
+                    i += 1;
+                }
+                // Skip digits of the old timestamp
+                while (i < template_content.len and std.ascii.isDigit(template_content[i])) {
+                    i += 1;
+                }
+                try result.appendSlice(allocator, ts_str);
+                continue;
+            }
+        }
+
+        try result.append(allocator, template_content[i]);
+        i += 1;
+    }
+
+    std.debug.print("[{s}] Uploading version file: {s} -> {s} (ts={})\n", .{ folder.local_dir, version_from, version_to, now_secs });
+    ssh.uploadBuffer(result.items, version_to, config.simple_log) catch |err| {
+        std.debug.print("Warning: Failed to upload version file: {s}\n", .{@errorName(err)});
+    };
 }
 
 pub fn saveDatabase(
