@@ -203,7 +203,48 @@ check=mtime_size
 no_db=true
 ```
 
-If `trigger_from` is not specified, an empty file will be created at `trigger_to` on the remote server.
+### Single File Sync Alias (`[file]`)
+
+For cases where you only need to sync a single file, you can use the `[file]` section alias. This is a simplified version of `[folder]` that automatically configures fast change detection and disables the remote database.
+
+**Example**:
+```ini
+[file]
+local_file=D:/project/src/deps.extra.txt
+remote_dir=/opt/dev/project/dev33
+```
+
+This is equivalent to the following complex configuration:
+```ini
+[folder]
+local_dir=D:/project/src
+remote_dir=/opt/dev/project/dev33
+includes=deps.extra.txt
+check=mtime_size
+no_db=true
+```
+
+### Sync Trigger
+
+The "Sync Trigger" feature allows you to copy a specific local file to the remote (or create an empty one) after each synchronization event. This is particularly useful for triggering remote scripts, CI/CD pipelines, or notifying other systems that a sync has completed.
+
+This is an additional option that can be used alongside [Version File Support](#version-file-support). While a version file is typically configured once per session (often in the first folder) to act as a global "heartbeat," a **Sync Trigger** can be configured for each folder individually to signal when that specific component has finished syncing.
+
+**How it works**:
+- After every successful sync (both initial and during watch mode), the tool checks for `trigger_to`.
+- If `trigger_from` is specified, that file is uploaded to `trigger_to`.
+- If `trigger_from` is NOT specified, an empty file is created at `trigger_to`.
+
+**Configuration**:
+```ini
+[folder]
+local_dir=./src
+remote_dir=/opt/app/src
+# Remote destination path for the trigger
+trigger_to=/opt/app/sync-complete.flag
+# Optional: Local file to copy as trigger
+trigger_from=./local-trigger.txt
+```
 
 ### Version File Support
 
