@@ -29,7 +29,7 @@ pub fn performInitialSync(
     remote_db: *ChecksumDb,
     remote_db_path: []const u8,
     printer: ansi.Printer,
-) !void {
+) !bool {
     std.debug.print("Scanning local directory: {s}\n", .{folder.local_dir});
     var scanner = Scanner.init(allocator, io, config, folder);
     defer scanner.deinit();
@@ -46,7 +46,7 @@ pub fn performInitialSync(
 
     if (changed_files.items.len == 0) {
         std.debug.print("Folder {s} is up to date!\n", .{folder.local_dir});
-        return;
+        return false;
     }
 
     std.debug.print("Uploading {} changed files for {s}...\n", .{ changed_files.items.len, folder.local_dir });
@@ -96,16 +96,18 @@ pub fn performInitialSync(
         }
     }
 
-    // Prune database: re-populate with only current local files
-    remote_db.clear();
-    for (scanner.files.items) |entry| {
-        try remote_db.put(entry.path, entry.checksum, entry.mtime, entry.size);
-    }
+    if (!folder.no_db) {
+        // Prune database: re-populate with only current local files
+        remote_db.clear();
+        for (scanner.files.items) |entry| {
+            try remote_db.put(entry.path, entry.checksum, entry.mtime, entry.size);
+        }
 
-    // Save updated database
-    try ssh_mutex.lock(io);
-    defer ssh_mutex.unlock(io);
-    try saveDatabase(allocator, io, config, folder, remote_db, ssh, remote_db_path);
+        // Save updated database
+        try ssh_mutex.lock(io);
+        defer ssh_mutex.unlock(io);
+        try saveDatabase(allocator, io, config, folder, remote_db, ssh, remote_db_path);
+    }
 
     // Initial Cleanup if requested
     if (config.cleanup) {
@@ -125,9 +127,9 @@ pub fn performInitialSync(
     }
 
     try performSyncTrigger(allocator, config, folder, ssh);
-    try performVersionFileUpload(allocator, io, config, folder, ssh);
 
     std.debug.print("Initial sync complete for {s}!\n", .{folder.local_dir});
+    return true;
 }
 
 pub fn performCleanup(
@@ -488,11 +490,15 @@ pub fn performVersionFileUpload(
     allocator: std.mem.Allocator,
     io: std.Io,
     config: *const Config,
-    folder: *const Folder,
+    folder: ?*const Folder,
     ssh: *SshSession,
 ) !void {
-    const version_from = folder.version_from orelse return;
-    const version_to = folder.version_to orelse return;
+    const v_from = if (folder) |f| f.version_from orelse config.version_from else config.version_from;
+    const v_to = if (folder) |f| f.version_to orelse config.version_to else config.version_to;
+    const v_name = if (folder) |f| f.version_name orelse config.version_name else config.version_name;
+
+    const version_from = v_from orelse return;
+    const version_to = v_to orelse return;
 
     const template_content = std.Io.Dir.cwd().readFileAlloc(io, version_from, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024))) catch |err| {
         std.debug.print("Warning: Failed to read version template {s}: {s}\n", .{ version_from, @errorName(err) });
@@ -518,7 +524,69 @@ pub fn performVersionFileUpload(
             continue;
         }
 
-        if (is_json and std.mem.startsWith(u8, template_content[i..], "\"timestamp\"")) {
+        if (v_name) |vn| {
+            if (std.mem.startsWith(u8, template_content[i..], "${version_name}")) {
+                try result.appendSlice(allocator, vn);
+                i += "${version_name}".len;
+                continue;
+            }
+
+            if (std.mem.startsWith(u8, template_content[i..], "${name}")) {
+                try result.appendSlice(allocator, vn);
+                i += "${name}".len;
+                continue;
+            }
+
+            if (is_json and std.mem.startsWith(u8, template_content[i..], "\"name\"")) {
+                try result.appendSlice(allocator, "\"name\"");
+                i += "\"name\"".len;
+                // Skip whitespaces and colon
+                while (i < template_content.len and (std.ascii.isWhitespace(template_content[i]) or template_content[i] == ':')) {
+                    try result.append(allocator, template_content[i]);
+                    i += 1;
+                }
+                // Skip optional starting quote
+                var has_quote = false;
+                if (i < template_content.len and template_content[i] == '\"') {
+                    has_quote = true;
+                    try result.append(allocator, '\"');
+                    i += 1;
+                }
+                // Skip old value
+                while (i < template_content.len and template_content[i] != '\"' and template_content[i] != ',' and template_content[i] != '}' and !std.ascii.isWhitespace(template_content[i])) {
+                    i += 1;
+                }
+                try result.appendSlice(allocator, vn);
+                if (has_quote and i < template_content.len and template_content[i] == '\"') {
+                    try result.append(allocator, '\"');
+                    i += 1;
+                } else if (has_quote) {
+                    try result.append(allocator, '\"');
+                }
+                continue;
+            }
+
+            if (is_ini and std.mem.startsWith(u8, template_content[i..], "name")) {
+                const is_start = (i == 0 or template_content[i - 1] == '\n');
+                if (is_start) {
+                    try result.appendSlice(allocator, "name");
+                    i += "name".len;
+                    // Skip whitespaces and equals
+                    while (i < template_content.len and (std.ascii.isWhitespace(template_content[i]) or template_content[i] == '=')) {
+                        try result.append(allocator, template_content[i]);
+                        i += 1;
+                    }
+                    // Skip old value until newline
+                    while (i < template_content.len and template_content[i] != '\n' and template_content[i] != '\r') {
+                        i += 1;
+                    }
+                    try result.appendSlice(allocator, vn);
+                    continue;
+                }
+            }
+        }
+
+        if (std.mem.startsWith(u8, template_content[i..], "\"timestamp\"") and is_json) {
             try result.appendSlice(allocator, "\"timestamp\"");
             i += "\"timestamp\"".len;
             // Skip whitespaces and colon
@@ -558,7 +626,11 @@ pub fn performVersionFileUpload(
         i += 1;
     }
 
-    std.debug.print("[{s}] Uploading version file: {s} -> {s} (ts={})\n", .{ folder.local_dir, version_from, version_to, now_secs });
+    if (folder) |f| {
+        std.debug.print("[{s}] Uploading version file: {s} -> {s} (ts={})\n", .{ f.local_dir, version_from, version_to, now_secs });
+    } else {
+        std.debug.print("Uploading global version file: {s} -> {s} (ts={})\n", .{ version_from, version_to, now_secs });
+    }
     ssh.uploadBuffer(result.items, version_to, config.simple_log) catch |err| {
         std.debug.print("Warning: Failed to upload version file: {s}\n", .{@errorName(err)});
     };
@@ -573,6 +645,7 @@ pub fn saveDatabase(
     ssh: *SshSession,
     db_path: []const u8,
 ) !void {
+    if (folder.no_db) return;
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
 

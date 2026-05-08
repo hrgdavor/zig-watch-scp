@@ -337,7 +337,11 @@ pub const SshSession = struct {
             c.LIBSSH2_FXF_READ,
             0,
             c.LIBSSH2_SFTP_OPENFILE,
-        ) orelse return error.RemoteFileOpenFailed;
+        ) orelse {
+            const err_code = c.libssh2_sftp_last_error(sftp);
+            std.debug.print("CRITICAL: Failed to open remote file '{s}' for reading. SFTP error code: {}\n", .{ remote_path, err_code });
+            return error.RemoteFileOpenFailed;
+        };
         defer _ = c.libssh2_sftp_close(remote_file);
 
         const local_file = try std.Io.Dir.cwd().createFile(self.io, local_path, .{});
@@ -405,7 +409,11 @@ pub const SshSession = struct {
             c.LIBSSH2_FXF_WRITE | c.LIBSSH2_FXF_CREAT | c.LIBSSH2_FXF_TRUNC,
             @intCast(self.file_mode),
             c.LIBSSH2_SFTP_OPENFILE,
-        ) orelse return error.RemoteFileOpenFailed;
+        ) orelse {
+            const err_code = c.libssh2_sftp_last_error(sftp);
+            std.debug.print("CRITICAL: Failed to open remote file '{s}' for writing. SFTP error code: {}\n", .{ remote_path, err_code });
+            return error.RemoteFileOpenFailed;
+        };
         defer _ = c.libssh2_sftp_close(remote_file);
 
         var offset: usize = 0;
@@ -569,6 +577,8 @@ pub const SshSession = struct {
         defer self.allocator.free(remote_path_z);
 
         if (c.libssh2_sftp_unlink_ex(sftp, remote_path_z.ptr, @intCast(remote_path.len)) != 0) {
+            const err_code = c.libssh2_sftp_last_error(sftp);
+            std.debug.print("CRITICAL: Failed to remove remote file '{s}'. SFTP error code: {}\n", .{ remote_path, err_code });
             return error.RemoteDeleteFailed;
         }
     }
@@ -580,6 +590,8 @@ pub const SshSession = struct {
         defer self.allocator.free(remote_path_z);
 
         if (c.libssh2_sftp_rmdir_ex(sftp, remote_path_z.ptr, @intCast(remote_path.len)) != 0) {
+            const err_code = c.libssh2_sftp_last_error(sftp);
+            std.debug.print("CRITICAL: Failed to remove remote directory '{s}'. SFTP error code: {}\n", .{ remote_path, err_code });
             return error.RemoteDeleteFailed;
         }
     }

@@ -15,6 +15,7 @@ pub const Folder = struct {
     trigger_to: ?[]const u8,
     version_from: ?[]const u8,
     version_to: ?[]const u8,
+    version_name: ?[]const u8,
     check: CheckMode = .hash,
     no_db: bool = false,
 };
@@ -49,6 +50,9 @@ pub const Config = struct {
     color: bool,
     file_mode: u32,
     dir_mode: u32,
+    version_from: ?[]const u8,
+    version_to: ?[]const u8,
+    version_name: ?[]const u8,
 
     // Standalone create mode
     create_folder: ?[]const u8,
@@ -256,6 +260,9 @@ pub const Config = struct {
             .exec_cmd = if (cli_exec_cmd) |cmd| try arena_allocator.dupe(u8, cmd) else null,
             .file_mode = 0o644,
             .dir_mode = 0o755,
+            .version_from = null,
+            .version_to = null,
+            .version_name = null,
             .text_extensions = try createDefaultTextExtensions(arena_allocator),
             .folders = try arena_allocator.alloc(Folder, 0),
             .local_copy_workers = try arena_allocator.alloc(LocalCopyWorkerConfig, 0),
@@ -312,7 +319,7 @@ pub const Config = struct {
             \\       sync [flags] create [--include <pat>] [--exclude <pat>] <folder>
             \\
             \\Flags:
-            \\  -c, --config <file>       Path to configuration file
+            \\  -c, --config <file>       Path to configuration file (use '-' to read from stdin)
             \\  -x, --compress            Enable SSH compression
             \\      --color               Force color output even when stdout is piped or redirected
             \\      --simple-log          Simple logging (no escape codes)
@@ -456,7 +463,13 @@ pub const Config = struct {
         config: *Config,
         file_path: []const u8,
     ) !void {
-        const content = try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024)));
+        const content = if (std.mem.eql(u8, file_path, "-")) blk: {
+            // Read config from stdin
+            var stdin_file = std.Io.File.stdin();
+            var chunk_buf: [4096]u8 = undefined;
+            var reader = stdin_file.reader(io, &chunk_buf);
+            break :blk try reader.interface.allocRemaining(allocator, .unlimited);
+        } else try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024)));
         defer allocator.free(content);
 
         var folders = std.ArrayList(Folder).empty;
@@ -475,6 +488,7 @@ pub const Config = struct {
         var cur_trigger_to: ?[]const u8 = null;
         var cur_version_from: ?[]const u8 = null;
         var cur_version_to: ?[]const u8 = null;
+        var cur_version_name: ?[]const u8 = null;
         var cur_check: CheckMode = .hash;
         var cur_no_db: bool = false;
 
@@ -495,6 +509,7 @@ pub const Config = struct {
                 t_to: *?[]const u8,
                 v_from: *?[]const u8,
                 v_to: *?[]const u8,
+                v_name: *?[]const u8,
                 check: CheckMode,
                 no_db: bool,
             ) !void {
@@ -510,6 +525,7 @@ pub const Config = struct {
                     .trigger_to = t_to.*,
                     .version_from = v_from.*,
                     .version_to = v_to.*,
+                    .version_name = v_name.*,
                     .check = check,
                     .no_db = no_db,
                 });
@@ -520,6 +536,7 @@ pub const Config = struct {
                 t_to.* = null;
                 v_from.* = null;
                 v_to.* = null;
+                v_name.* = null;
             }
         }.push;
 
@@ -563,7 +580,7 @@ pub const Config = struct {
             if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
             if (std.mem.eql(u8, trimmed, "[folder]")) {
-                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, cur_check, cur_no_db);
+                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db);
                 if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
                 if (section == .local_folder) try pushLocalWorker(allocator, &local_copy_workers, &cur_dest_dir, &cur_sources);
                 section = .folder;
@@ -574,7 +591,7 @@ pub const Config = struct {
             }
 
             if (std.mem.eql(u8, trimmed, "[file]")) {
-                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, cur_check, cur_no_db);
+                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db);
                 if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
                 if (section == .local_folder) try pushLocalWorker(allocator, &local_copy_workers, &cur_dest_dir, &cur_sources);
                 section = .file;
@@ -585,7 +602,7 @@ pub const Config = struct {
             }
 
             if (std.mem.eql(u8, trimmed, "[local-folder]")) {
-                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, cur_check, cur_no_db);
+                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db);
                 if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
                 if (section == .local_folder) try pushLocalWorker(allocator, &local_copy_workers, &cur_dest_dir, &cur_sources);
                 section = .local_folder;
@@ -593,7 +610,7 @@ pub const Config = struct {
             }
 
             if (std.mem.eql(u8, trimmed, "[source]")) {
-                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, cur_check, cur_no_db);
+                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db);
                 if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
                 section = .source;
                 continue;
@@ -617,6 +634,24 @@ pub const Config = struct {
                     config.parallel_threads = try std.fmt.parseInt(usize, value, 10);
                 } else if (std.mem.eql(u8, key, "watch_delay_ms")) {
                     config.watch_delay_ms = try std.fmt.parseInt(u64, value, 10);
+                } else if (std.mem.eql(u8, key, "version_from")) {
+                    if (section == .global) {
+                        config.version_from = try allocator.dupe(u8, value);
+                    } else if (section == .folder or section == .file) {
+                        cur_version_from = try allocator.dupe(u8, value);
+                    }
+                } else if (std.mem.eql(u8, key, "version_to")) {
+                    if (section == .global) {
+                        config.version_to = try allocator.dupe(u8, value);
+                    } else if (section == .folder or section == .file) {
+                        cur_version_to = try allocator.dupe(u8, value);
+                    }
+                } else if (std.mem.eql(u8, key, "version_name")) {
+                    if (section == .global) {
+                        config.version_name = try allocator.dupe(u8, value);
+                    } else if (section == .folder or section == .file) {
+                        cur_version_name = try allocator.dupe(u8, value);
+                    }
                 } else if (std.mem.eql(u8, key, "compress")) {
                     config.compress = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "yes");
                 } else if (std.mem.eql(u8, key, "cleanup")) {
@@ -661,23 +696,15 @@ pub const Config = struct {
                         cur_local_db = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "yes");
                     }
                 } else if (std.mem.eql(u8, key, "trigger_from")) {
-                    if (section == .folder) {
+                    if (section == .folder or section == .file) {
                         cur_trigger_from = try allocator.dupe(u8, value);
                     }
                 } else if (std.mem.eql(u8, key, "trigger_to")) {
-                    if (section == .folder) {
+                    if (section == .folder or section == .file) {
                         cur_trigger_to = try allocator.dupe(u8, value);
                     }
-                } else if (std.mem.eql(u8, key, "version_from")) {
-                    if (section == .folder) {
-                        cur_version_from = try allocator.dupe(u8, value);
-                    }
-                } else if (std.mem.eql(u8, key, "version_to")) {
-                    if (section == .folder) {
-                        cur_version_to = try allocator.dupe(u8, value);
-                    }
                 } else if (std.mem.eql(u8, key, "check")) {
-                    if (section == .folder) {
+                    if (section == .folder or section == .file) {
                         if (std.mem.eql(u8, value, "mtime_size")) {
                             cur_check = .mtime_size;
                         } else {
@@ -685,7 +712,7 @@ pub const Config = struct {
                         }
                     }
                 } else if (std.mem.eql(u8, key, "no_db")) {
-                    if (section == .folder) {
+                    if (section == .folder or section == .file) {
                         cur_no_db = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "yes");
                     }
                 } else if (std.mem.eql(u8, key, "file_mode")) {
@@ -696,7 +723,7 @@ pub const Config = struct {
             }
         }
 
-        if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, cur_check, cur_no_db);
+        if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db);
         if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
         if (section == .local_folder or section == .source) try pushLocalWorker(allocator, &local_copy_workers, &cur_dest_dir, &cur_sources);
 

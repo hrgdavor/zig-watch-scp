@@ -20,7 +20,7 @@ A cross-platform file synchronization tool written in Zig 0.16 that uses SSH/SCP
 - **Granular Pattern Matching**: Individual include/exclude patterns for each folder pair
 - **Remote Cleanup**: Optional `--cleanup` flag to remove files on the remote server that are not present locally (respects include/exclude patterns)
 - **Sync Trigger**: Copy a specific local file to the remote (or create an empty one) after each synchronization. Useful for triggering remote scripts or CI/CD pipelines in restricted environments.
-- **Version File Support**: Automatically updates a version file (JSON or INI) with the current timestamp and uploads it to the remote server.
+- **Version File Support**: Automatically updates a version file (JSON or INI) with the current timestamp and optional project name (`version_name`), then uploads it to the remote server.
 - **Colored lines** for copied files
 - **SSH Agent Support**: Compatible with [KeePassXC](https://keepassxc.org/) and other SSH agents for secure, passphrase-free authentication.
 - **Lightweight Sync Options**: Choose between content hashing or file attribute checks (`mtime` + `size`). Optionally disable the remote database entirely for simple sync tasks.
@@ -96,7 +96,7 @@ sync -c sync.conf
 
 ### Command Line Options
 
-- `-c, --config <path>`: Path to configuration file (required for sync mode)
+- `-c, --config <path>`: Path to configuration file — use `-c -` to read from **stdin**
 - `-x, --compress`: Enable SSH compression
 - `--color`: Force ANSI color output even when stdout is not a terminal
 - `--cleanup`: Remove remote files not present locally (matching patterns)
@@ -119,6 +119,10 @@ sync -c sync.conf --no-color
 
 # Sync overriding host and credentials
 sync -c sync.conf myserver.com myuser mypass
+
+# Read config from stdin (pipe or heredoc)
+cat sync.conf | sync -w -c -
+sync -c - < sync.conf
 ```
 
 ### Color Output Behavior
@@ -252,29 +256,106 @@ The "Version File Support" allows you to maintain a "heartbeat" or version indic
 
 **How it works**:
 1. The tool reads a local template file (`version_from`).
-2. It replaces placeholders (like `${timestamp}`) or specific properties (for `.json` and `.ini`) with the current epoch timestamp (in seconds).
+2. It replaces placeholders and specific properties with the current epoch timestamp (in seconds) and optional project name (`version_name`).
 3. The processed file is uploaded to the remote path (`version_to`).
+
+`version_from` / `version_to` / `version_name` can be set **globally** (applies to all folders) or **per-folder** (folder value takes priority over global).
 
 **Configuration**:
 ```ini
+# Global (applies to all folders)
+version_from=./version.json
+version_to=/opt/app/version.json
+version_name=MyProject-1.0
+
 [folder]
 local_dir=./src
 remote_dir=/opt/app/src
-# Local template file
-version_from=./version.json.template
-# Remote destination path
-version_to=/opt/app/version.json
+# Per-folder override (takes priority over global)
+version_from=./comp.json
+version_to=/opt/app/comp.json
+version_name=Component-2
 ```
 
-**JSON Template (`version.json.template`)**:
+**Placeholder injection** (all formats):
+
+| Placeholder       | Replaced with                    |
+| ----------------- | -------------------------------- |
+| `${timestamp}`    | Current Unix timestamp (seconds) |
+| `${name}`         | Value of `version_name`          |
+| `${version_name}` | Value of `version_name` (alias)  |
+
+**Automatic field injection** (by file extension):
+
+| Extension | Field replaced       | Example result            |
+| --------- | -------------------- | ------------------------- |
+| `.json`   | `"timestamp": <old>` | `"timestamp": 1715170800` |
+| `.json`   | `"name": "<old>"`    | `"name": "MyProject-1.0"` |
+| `.ini`    | `timestamp=<old>`    | `timestamp=1715170800`    |
+| `.ini`    | `name=<old>`         | `name=MyProject-1.0`      |
+
+**JSON Template (`version.json`)**:
 ```json
 {
-  "version": "1.0.0",
-  "sync_time": ${timestamp}
+  "name": "placeholder",
+  "timestamp": 0
+}
+```
+Result after sync:
+```json
+{
+  "name": "MyProject-1.0",
+  "timestamp": 1715170800
 }
 ```
 
-The tool also automatically detects `.json` and `.ini` extensions and can update a `timestamp` property even without a placeholder.
+**INI Template (`version.ini`)**:
+```ini
+name=placeholder
+timestamp=0
+```
+Result after sync:
+```ini
+name=MyProject-1.0
+timestamp=1715170800
+```
+
+**Generic template (any extension)**:
+```
+version=${name} built at ${timestamp}
+```
+Result after sync:
+```
+version=MyProject-1.0 built at 1715170800
+```
+
+### Reading Config from Stdin
+
+Pass `-c -` (a single dash) to read the configuration from standard input instead of a file. This is useful for:
+- Piping a dynamically generated config
+- Securely injecting credentials without writing them to disk
+- Shell heredocs in CI/CD scripts
+
+```sh
+# Pipe config from a file
+cat sync.conf | sync -w -c -
+
+# Redirect from a file
+sync -c - < sync.conf
+
+# Generate config dynamically (e.g., inject password from a secret manager)
+my-secret-tool render sync.conf.tpl | sync -w -c -
+
+# Heredoc
+sync -c - <<'EOF'
+host=myserver.com
+username=user
+key_path=~/.ssh/id_rsa
+[folder]
+local_dir=./src
+remote_dir=/opt/app/src
+EOF
+```
 
 ### Remote Permissions and ACL Support 
 > since v1.3.2

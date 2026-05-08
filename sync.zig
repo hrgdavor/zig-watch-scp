@@ -131,6 +131,7 @@ pub fn main(init: std.process.Init) !void {
         allocator.free(folder_syncs);
     }
 
+    var any_changes = false;
     for (config.folders, 0..) |*folder, i| {
         std.debug.print("\n=== Initializing folder: {s} ===\n", .{folder.local_dir});
 
@@ -170,7 +171,7 @@ pub fn main(init: std.process.Init) !void {
                 ssh_worker.ssh_mutex.lock(init.io) catch {};
                 if (ssh.downloadFile(db_path, tmp_path)) |_| {
                     ssh_worker.ssh_mutex.unlock(init.io);
-                    if (std.Io.Dir.cwd().readFileAlloc(init.io, tmp_path, allocator, @as(std.Io.Limit, @enumFromInt(10 * 1024 * 1024)))) |content| {
+                    if (std.Io.Dir.cwd().readFileAlloc(init.io, tmp_path, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024)))) |content| {
                         defer std.Io.Dir.cwd().deleteFile(init.io, tmp_path) catch {};
                         defer allocator.free(content);
                         remote_db.deinit();
@@ -194,7 +195,9 @@ pub fn main(init: std.process.Init) !void {
 
         // Perform initial sync with timing
         const t0 = std.Io.Timestamp.now(init.io, .boot);
-        try ssh_worker.performInitialSync(allocator, init.io, &config, folder, &ssh, &remote_db, db_path, printer);
+        if (try ssh_worker.performInitialSync(allocator, init.io, &config, folder, &ssh, &remote_db, db_path, printer)) {
+            any_changes = true;
+        }
         const elapsed_ns = t0.durationTo(std.Io.Timestamp.now(init.io, .boot)).nanoseconds;
         const sync_duration = @as(f64, @floatFromInt(@as(i64, @intCast(elapsed_ns)))) / @as(f64, @floatFromInt(std.time.ns_per_s));
         std.debug.print("Initial sync completed in {d:.2} seconds.\n\n", .{sync_duration});
@@ -209,6 +212,10 @@ pub fn main(init: std.process.Init) !void {
             .watcher = watcher_inst,
         };
         folder_syncs_count += 1;
+    }
+
+    if (any_changes) {
+        try ssh_worker.performVersionFileUpload(allocator, init.io, &config, null, &ssh);
     }
 
     if (config.watch) {
@@ -251,6 +258,7 @@ fn handleCreateDb(allocator: std.mem.Allocator, io: anytype, config: *const Conf
         .trigger_to = null,
         .version_from = null,
         .version_to = null,
+        .version_name = null,
     };
 
     // Scan directory
