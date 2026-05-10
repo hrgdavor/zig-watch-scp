@@ -91,6 +91,8 @@ pub const Config = struct {
         var cli_password: ?[]const u8 = null;
         var cli_check: ?CheckMode = null;
         var cli_no_db: bool = false;
+        // --var VARNAME=value entries: highest priority in variable expansion
+        var cli_vars = std.StringHashMap([]const u8).init(arena_allocator);
 
         // ── subcommand / flag scanning ─────────────────────────────────────────
         // Subcommands recognized: get, put, create.
@@ -187,6 +189,20 @@ pub const Config = struct {
                 }
             } else if (std.mem.eql(u8, arg, "--no-db")) {
                 cli_no_db = true;
+            } else if (std.mem.eql(u8, arg, "--var") or std.mem.eql(u8, arg, "-D")) {
+                i += 1;
+                if (i >= raw_args.len) return error.MissingArgValue;
+                const pair = raw_args[i];
+                const eq = std.mem.indexOfScalar(u8, pair, '=') orelse {
+                    std.debug.print("Error: --var expects VARNAME=value, got: {s}\n", .{pair});
+                    return error.InvalidArgFormat;
+                };
+                const vname = pair[0..eq];
+                const vval = pair[eq + 1 ..];
+                try cli_vars.put(
+                    try arena_allocator.dupe(u8, vname),
+                    try arena_allocator.dupe(u8, vval),
+                );
             } else {
                 std.debug.print("Error: Unknown argument: {s}\n", .{arg});
                 return error.UnknownArgument;
@@ -280,7 +296,7 @@ pub const Config = struct {
 
         // ── read config file ──────────────────────────────────────────────────
         if (config_path) |cp| {
-            try parseIntoConfig(arena_allocator, init.io, &config, cp);
+            try parseIntoConfig(arena_allocator, init.io, init.minimal.environ, cli_vars, &config, cp);
         }
 
         // Resolve SSH config before environment fallbacks and validation
@@ -457,9 +473,63 @@ pub const Config = struct {
         return result;
     }
 
+    /// Expand ${VARNAME} placeholders in a config value.
+    /// Priority: real environment variable > ENV.VARNAME= config default.
+    /// Returns error.UndefinedConfigVariable if the variable is not found in either.
+    /// Caller owns the returned slice (always allocated, even when no expansion happens).
+    fn expandVars(
+        allocator: std.mem.Allocator,
+        value: []const u8,
+        environ: std.process.Environ,
+        cli_vars: std.StringHashMap([]const u8),
+        env_defaults: *const std.StringHashMap([]const u8),
+    ) ![]const u8 {
+        if (std.mem.indexOf(u8, value, "${") == null) {
+            return allocator.dupe(u8, value);
+        }
+        var result = std.ArrayList(u8).empty;
+        errdefer result.deinit(allocator);
+        var i: usize = 0;
+        while (i < value.len) {
+            if (i + 1 < value.len and value[i] == '$' and value[i + 1] == '{') {
+                const name_start = i + 2;
+                const close = std.mem.indexOfScalarPos(u8, value, name_start, '}') orelse {
+                    std.debug.print("Config error: unclosed '${{' in value: {s}\n", .{value});
+                    return error.UnclosedVariableBrace;
+                };
+                const var_name = value[name_start..close];
+                // Priority: 1. --var CLI flag  2. real env var  3. ENV.X= config default
+                if (cli_vars.get(var_name)) |cli_val| {
+                    try result.appendSlice(allocator, cli_val);
+                } else if (environ.getAlloc(allocator, var_name)) |env_val| {
+                    defer allocator.free(env_val);
+                    try result.appendSlice(allocator, env_val);
+                } else |_| {
+                    if (env_defaults.get(var_name)) |default_val| {
+                        try result.appendSlice(allocator, default_val);
+                    } else {
+                        std.debug.print(
+                            "Config error: variable '${{{s}}}' is not defined.\n" ++
+                                "  Set it via: --var {s}=value  |  env var {s}  |  ENV.{s}= in config\n",
+                            .{ var_name, var_name, var_name, var_name },
+                        );
+                        return error.UndefinedConfigVariable;
+                    }
+                }
+                i = close + 1;
+            } else {
+                try result.append(allocator, value[i]);
+                i += 1;
+            }
+        }
+        return result.toOwnedSlice(allocator);
+    }
+
     pub fn parseIntoConfig(
         allocator: std.mem.Allocator,
         io: std.Io,
+        environ: std.process.Environ,
+        cli_vars: std.StringHashMap([]const u8),
         config: *Config,
         file_path: []const u8,
     ) !void {
@@ -471,6 +541,44 @@ pub const Config = struct {
             break :blk try reader.interface.allocRemaining(allocator, .unlimited);
         } else try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024)));
         defer allocator.free(content);
+
+        // --- Pass 1: collect ENV.VARNAME= defaults from global scope ---
+        // These act as fallbacks when a real environment variable is not set.
+        var env_defaults = std.StringHashMap([]const u8).init(allocator);
+        defer {
+            var env_it = env_defaults.iterator();
+            while (env_it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                allocator.free(entry.value_ptr.*);
+            }
+            env_defaults.deinit();
+        }
+        {
+            var pre_iter = std.mem.splitScalar(u8, content, '\n');
+            var in_global = true;
+            while (pre_iter.next()) |raw_line| {
+                const tl = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
+                if (tl.len == 0 or tl[0] == '#') continue;
+                if (tl[0] == '[') { in_global = false; continue; }
+                if (!in_global) continue;
+                const eq = std.mem.indexOf(u8, tl, "=") orelse continue;
+                const k = std.mem.trim(u8, tl[0..eq], &std.ascii.whitespace);
+                const v = std.mem.trim(u8, tl[eq + 1 ..], &std.ascii.whitespace);
+                if (std.mem.startsWith(u8, k, "ENV.")) {
+                    const var_name = k["ENV.".len..];
+                    // --var CLI and real env var both win; only store if neither is set
+                    if (cli_vars.get(var_name) != null) {
+                        // CLI var overrides, skip storing default
+                    } else if (environ.getAlloc(allocator, var_name)) |val| {
+                        allocator.free(val); // real env var exists, skip default
+                    } else |_| {
+                        const stored_key = try allocator.dupe(u8, var_name);
+                        const stored_val = try allocator.dupe(u8, v);
+                        try env_defaults.put(stored_key, stored_val);
+                    }
+                }
+            }
+        }
 
         var folders = std.ArrayList(Folder).empty;
         var local_copy_workers = std.ArrayList(LocalCopyWorkerConfig).empty;
@@ -618,7 +726,14 @@ pub const Config = struct {
 
             if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
                 const key = std.mem.trim(u8, trimmed[0..eq_pos], &std.ascii.whitespace);
-                const value = std.mem.trim(u8, trimmed[eq_pos + 1 ..], &std.ascii.whitespace);
+                const raw_value = std.mem.trim(u8, trimmed[eq_pos + 1 ..], &std.ascii.whitespace);
+
+                // ENV.VARNAME= lines are collected in pass 1; skip them here
+                if (std.mem.startsWith(u8, key, "ENV.")) continue;
+
+                // Expand ${VARNAME} placeholders; caller frees the owned result
+                const value = try expandVars(allocator, raw_value, environ, cli_vars, &env_defaults);
+                defer allocator.free(value);
 
                 if (std.mem.eql(u8, key, "host") and config.host.len == 0) {
                     config.host = try allocator.dupe(u8, value);

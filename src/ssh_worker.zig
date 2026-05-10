@@ -393,7 +393,9 @@ pub fn processReadySync(
     if (fs.folder.no_db) {
         if (try ssh.getFileInfo(rel_path)) |remote_info| {
             if (fs.folder.check == .mtime_size) {
-                is_changed = (remote_info.mtime != mtime or remote_info.size != stat.size);
+                // Upload if local is newer, OR binary file changed size
+                is_changed = mtime > remote_info.mtime or
+                    (!is_text and stat.size != remote_info.size);
             } else {
                 checksum = try checksum_db.calculateFileChecksum(allocator, io, local_path, is_text);
                 // We don't have the remote hash easily without DB, so if check=hash and no_db,
@@ -409,7 +411,9 @@ pub fn processReadySync(
     } else {
         if (fs.remote_db.get(rel_path)) |old_entry| {
             if (fs.folder.check == .mtime_size) {
-                is_changed = (old_entry.mtime != mtime or old_entry.size != stat.size);
+                // Upload if local is newer, OR binary file changed size
+                is_changed = mtime > old_entry.mtime or
+                    (!is_text and stat.size != old_entry.size);
             } else {
                 checksum = try checksum_db.calculateFileChecksum(allocator, io, local_path, is_text);
                 is_changed = (old_entry.hash != checksum);

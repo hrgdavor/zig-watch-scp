@@ -12,7 +12,7 @@ pub const SshSession = struct {
     sftp: ?*c.LIBSSH2_SFTP,
     file_mode: u32,
     dir_mode: u32,
-    pub const FileInfo = struct { size: u64, mtime: i64 };
+    pub const FileInfo = struct { size: u64, mtime: i64 }; // mtime in milliseconds since epoch
 
     pub fn libInit() !void {
         if (builtin.os.tag == .windows) {
@@ -379,7 +379,8 @@ pub const SshSession = struct {
             res.size = attrs.filesize;
         }
         if ((attrs.flags & c.LIBSSH2_SFTP_ATTR_ACMODTIME) != 0) {
-            res.mtime = @intCast(attrs.mtime);
+            // SFTP mtime is in seconds; multiply by 1000 to match local stat (ms)
+            res.mtime = @as(i64, @intCast(attrs.mtime)) * 1000;
         }
         return res;
     }

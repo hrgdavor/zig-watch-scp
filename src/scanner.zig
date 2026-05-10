@@ -249,7 +249,9 @@ pub const Scanner = struct {
             var is_changed = false;
             if (remote_entry) |re| {
                 if (self.folder.check == .mtime_size) {
-                    is_changed = (re.mtime != entry.mtime or re.size != entry.size);
+                    // Upload if local is newer, OR binary file changed size
+                    is_changed = entry.mtime > re.mtime or
+                        (!entry.is_text and entry.size != re.size);
                 } else {
                     is_changed = (re.hash != entry.checksum);
                 }
