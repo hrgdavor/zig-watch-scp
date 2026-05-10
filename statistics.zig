@@ -3,6 +3,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const watcher = @import("src/watcher.zig");
+const app_version = @import("src/app_version.zig");
 
 const RawEvent = struct {
     timestamp_ms: u64,
@@ -198,6 +199,7 @@ fn parseArgs(args: []const []const u8) !Config {
 }
 
 fn printUsage() void {
+    app_version.printHeader("statistics");
     std.debug.print("Usage: statistics [options]\n  --path, -p <dir>          Directory to watch (default: .)\n  --scenario, -s <name>     Scenario tag for report output (default: manual)\n  --report-dir <dir>        Output directory for reports (default: stats-reports)\n  --duration, -d <ms>       Watch duration in milliseconds (default: 30000, 0 = indefinite)\n  --max-events <n>          Stop after at most n events (default: 0 = unlimited)\n  --help, -h                Show this help message\n", .{});
 }
 

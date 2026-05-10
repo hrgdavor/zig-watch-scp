@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
+const build_options = @import("config");
 const common = @import("watcher_common.zig");
 
 pub const FileChange = common.FileChange;

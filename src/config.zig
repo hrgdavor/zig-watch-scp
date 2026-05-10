@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-GPL-3.0-with-Commons-Clause
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
+const app_version = @import("app_version.zig");
 
 pub const CheckMode = enum { hash, mtime_size };
 
@@ -332,6 +333,7 @@ pub const Config = struct {
     }
 
     fn printHelp() void {
+        app_version.printHeader("sync");
         std.debug.print(
             \\Usage: sync [flags] <config-file>
             \\       sync [flags] <host> <username> <password>

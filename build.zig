@@ -56,9 +56,23 @@ pub fn build(b: *std.Build) void {
     const build_opts = b.addOptions();
     const use_nightwatch = b.option(bool, "use_nightwatch", "Enable Nightwatch backend") orelse false;
     const use_coreservices = target.result.os.tag == .macos and builtin.os.tag == .macos;
+    
+    // Extract version from build.zig.zon
+    const version = v: {
+        const zon_content = b.build_root.handle.readFileAlloc(b.graph.io, "build.zig.zon", b.allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024))) catch break :v "0.0.0";
+        if (std.mem.indexOf(u8, zon_content, ".version = \"")) |idx| {
+            const start = idx + ".version = \"".len;
+            if (std.mem.indexOfScalarPos(u8, zon_content, start, '"')) |end| {
+                break :v zon_content[start..end];
+            }
+        }
+        break :v "0.0.0";
+    };
+
     build_opts.addOption(bool, "use_nightwatch", use_nightwatch);
     build_opts.addOption(bool, "use_coreservices", use_coreservices);
-    exe.root_module.addOptions("build_options", build_opts);
+    build_opts.addOption([]const u8, "version", version);
+    exe.root_module.addOptions("config", build_opts);
 
     const nightwatch_dep = b.dependency("nightwatch", .{
         .target = target,
@@ -142,7 +156,7 @@ pub fn build(b: *std.Build) void {
 
     stats_exe.root_module.addSystemIncludePath(b.path("src"));
     stats_exe.root_module.addImport("c", c_module);
-    stats_exe.root_module.addOptions("build_options", build_opts);
+    stats_exe.root_module.addOptions("config", build_opts);
     stats_exe.root_module.addImport("nightwatch", nightwatch_dep.module("nightwatch"));
 
     if (use_coreservices) {

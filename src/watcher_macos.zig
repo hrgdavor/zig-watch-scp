@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
 const watcher_common = @import("watcher_common.zig");
-const bopts = @import("build_options");
+const bopts = @import("config");
 
 // Only compile CoreServices C headers when building natively on macOS.
 // Cross-compiled builds (e.g. from Windows) fall back to a polling watcher.
