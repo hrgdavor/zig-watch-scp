@@ -57,10 +57,14 @@ pub fn performInitialSync(
     if (num_threads <= 1) {
         // Single-threaded mode
         for (changed_files.items, 1..) |entry, i| {
-            std.debug.print("[{}/{}] Syncing: {s}\n", .{ i, changed_files.items.len, entry.path });
-            try syncFile(allocator, config, folder, ssh, entry.path);
-            try remote_db.put(entry.path, entry.checksum, entry.mtime, entry.size);
-            printer.printc(.yellow, "[{}/{}] Synced: {s}\n", .{ i, changed_files.items.len, entry.path });
+            if (config.dry_run) {
+                std.debug.print("[{}/{}] Dry-run: Would sync: {s}\n", .{ i, changed_files.items.len, entry.path });
+            } else {
+                std.debug.print("[{}/{}] Syncing: {s}\n", .{ i, changed_files.items.len, entry.path });
+                try syncFile(allocator, config, folder, ssh, entry.path);
+                try remote_db.put(entry.path, entry.checksum, entry.mtime, entry.size);
+                printer.printc(.yellow, "[{}/{}] Synced: {s}\n", .{ i, changed_files.items.len, entry.path });
+            }
         }
     } else {
         // Multi-threaded mode
@@ -96,7 +100,7 @@ pub fn performInitialSync(
         }
     }
 
-    if (!folder.no_db) {
+    if (!folder.no_db and !config.dry_run) {
         // Prune database: re-populate with only current local files
         remote_db.clear();
         for (scanner.files.items) |entry| {
@@ -116,17 +120,22 @@ pub fn performInitialSync(
         for (scanner.files.items) |entry| {
             try local_paths.put(entry.path, {});
         }
-        try performCleanup(allocator, folder, ssh, &local_paths);
+        try performCleanup(allocator, config, folder, ssh, &local_paths);
     }
 
     if (config.exec_cmd) |cmd| {
-        std.debug.print("Executing remote command after initial sync: {s}\n", .{cmd});
-        ssh.exec(cmd) catch |err| {
-            std.debug.print("Warning: Failed to execute remote command: {s}\n", .{@errorName(err)});
-        };
+        if (config.dry_run) {
+            std.debug.print("Dry-run: Would execute remote command after initial sync: {s}\n", .{cmd});
+        } else {
+            std.debug.print("Executing remote command after initial sync: {s}\n", .{cmd});
+            ssh.exec(cmd) catch |err| {
+                std.debug.print("Warning: Failed to execute remote command: {s}\n", .{@errorName(err)});
+            };
+        }
     }
 
     try performSyncTrigger(allocator, config, folder, ssh);
+    try performVersionFileUpload(allocator, io, config, folder, ssh);
 
     std.debug.print("Initial sync complete for {s}!\n", .{folder.local_dir});
     return true;
@@ -134,6 +143,7 @@ pub fn performInitialSync(
 
 pub fn performCleanup(
     allocator: std.mem.Allocator,
+    config: *const Config,
     folder: *const Folder,
     ssh: *SshSession,
     local_files: *std.StringHashMap(void),
@@ -162,8 +172,12 @@ pub fn performCleanup(
             if (shouldSyncFile(rel_path, folder)) {
                 // If it matches patterns but isn't in local_files, delete it
                 if (!local_files.contains(rel_path)) {
-                    std.debug.print("Cleanup: Removing remote file {s}\n", .{remote_full_path});
-                    try ssh.removeRemoteFile(remote_full_path);
+                    if (config.dry_run) {
+                        std.debug.print("Cleanup: Dry-run: Would remove remote file {s}\n", .{remote_full_path});
+                    } else {
+                        std.debug.print("Cleanup: Removing remote file {s}\n", .{remote_full_path});
+                        try ssh.removeRemoteFile(remote_full_path);
+                    }
                     removed_count += 1;
                 }
             }
@@ -229,21 +243,25 @@ pub fn uploadWorker(ctx: *WorkContext) void {
 
         const entry = ctx.files[index];
 
-        std.debug.print("[{}/{}] Syncing: {s}\n", .{ index + 1, ctx.total, entry.path });
-
-        // Upload file (using local session, no global lock)
-        syncFile(ctx.allocator, ctx.config, ctx.folder, &local_ssh.?, entry.path) catch |err| {
-            std.debug.print("Upload failed for {s}: {s}\n", .{ entry.path, @errorName(err) });
-            ctx.mutex.lock(ctx.io) catch {};
-            ctx.has_error = true;
-            ctx.mutex.unlock(ctx.io);
-            continue;
-        };
+        if (ctx.config.dry_run) {
+            std.debug.print("[{}/{}] Dry-run: Would sync: {s}\n", .{ index + 1, ctx.total, entry.path });
+        } else {
+            // Upload file (using local session, no global lock)
+            syncFile(ctx.allocator, ctx.config, ctx.folder, &local_ssh.?, entry.path) catch |err| {
+                std.debug.print("Upload failed for {s}: {s}\n", .{ entry.path, @errorName(err) });
+                ctx.mutex.lock(ctx.io) catch {};
+                ctx.has_error = true;
+                ctx.mutex.unlock(ctx.io);
+                continue;
+            };
+        }
 
         // Update progress AND database (thread-safe)
         ctx.mutex.lock(ctx.io) catch {};
         ctx.completed += 1;
-        ctx.remote_db.put(entry.path, entry.checksum, entry.mtime, entry.size) catch {};
+        if (!ctx.config.dry_run) {
+            ctx.remote_db.put(entry.path, entry.checksum, entry.mtime, entry.size) catch {};
+        }
         const completed = ctx.completed;
         const total = ctx.total;
         ctx.mutex.unlock(ctx.io);
@@ -435,18 +453,26 @@ pub fn processReadySync(
     try ssh_mutex.lock(io);
     defer ssh_mutex.unlock(io);
 
-    try syncFile(allocator, config, fs.folder, ssh, rel_path);
+    if (config.dry_run) {
+        std.debug.print("[{s}] Dry-run: Would upload: {s}\n", .{ fs.folder.local_dir, rel_path });
+    } else {
+        try syncFile(allocator, config, fs.folder, ssh, rel_path);
 
-    if (!fs.folder.no_db) {
-        try fs.remote_db.put(rel_path, checksum, mtime, stat.size);
-        try saveDatabase(allocator, io, config, fs.folder, &fs.remote_db, ssh, fs.remote_db_path);
+        if (!fs.folder.no_db) {
+            try fs.remote_db.put(rel_path, checksum, mtime, stat.size);
+            try saveDatabase(allocator, io, config, fs.folder, &fs.remote_db, ssh, fs.remote_db_path);
+        }
     }
 
     if (config.exec_cmd) |cmd| {
-        std.debug.print("[{s}] Executing remote command: {s}\n", .{ fs.folder.local_dir, cmd });
-        ssh.exec(cmd) catch |err| {
-            std.debug.print("Warning: Failed to execute remote command: {s}\n", .{@errorName(err)});
-        };
+        if (config.dry_run) {
+            std.debug.print("[{s}] Dry-run: Would execute remote command: {s}\n", .{ fs.folder.local_dir, cmd });
+        } else {
+            std.debug.print("[{s}] Executing remote command: {s}\n", .{ fs.folder.local_dir, cmd });
+            ssh.exec(cmd) catch |err| {
+                std.debug.print("Warning: Failed to execute remote command: {s}\n", .{@errorName(err)});
+            };
+        }
     }
 
     try performSyncTrigger(allocator, config, fs.folder, ssh);
@@ -478,15 +504,23 @@ pub fn performSyncTrigger(
     const trigger_to = folder.trigger_to orelse return;
 
     if (folder.trigger_from) |trigger_from| {
-        std.debug.print("[{s}] Copying trigger file: {s} -> {s}\n", .{ folder.local_dir, trigger_from, trigger_to });
-        ssh.uploadFile(trigger_from, trigger_to, config.simple_log) catch |err| {
-            std.debug.print("Warning: Failed to copy trigger file: {s}\n", .{@errorName(err)});
-        };
+        if (config.dry_run) {
+            std.debug.print("[{s}] Dry-run: Would copy trigger file: {s} -> {s}\n", .{ folder.local_dir, trigger_from, trigger_to });
+        } else {
+            std.debug.print("[{s}] Copying trigger file: {s} -> {s}\n", .{ folder.local_dir, trigger_from, trigger_to });
+            ssh.uploadFile(trigger_from, trigger_to, config.simple_log) catch |err| {
+                std.debug.print("Warning: Failed to copy trigger file: {s}\n", .{@errorName(err)});
+            };
+        }
     } else {
-        std.debug.print("[{s}] Writing empty trigger file: {s}\n", .{ folder.local_dir, trigger_to });
-        ssh.uploadBuffer(&[_]u8{}, trigger_to, config.simple_log) catch |err| {
-            std.debug.print("Warning: Failed to write empty trigger file: {s}\n", .{@errorName(err)});
-        };
+        if (config.dry_run) {
+            std.debug.print("[{s}] Dry-run: Would write empty trigger file: {s}\n", .{ folder.local_dir, trigger_to });
+        } else {
+            std.debug.print("[{s}] Writing empty trigger file: {s}\n", .{ folder.local_dir, trigger_to });
+            ssh.uploadBuffer(&[_]u8{}, trigger_to, config.simple_log) catch |err| {
+                std.debug.print("Warning: Failed to write empty trigger file: {s}\n", .{@errorName(err)});
+            };
+        }
     }
 }
 
@@ -520,11 +554,15 @@ pub fn performVersionFileUpload(
     const is_json = std.mem.endsWith(u8, version_from, ".json");
     const is_ini = std.mem.endsWith(u8, version_from, ".ini");
 
+    var found_timestamp = false;
+    var found_name = false;
+
     var i: usize = 0;
     while (i < template_content.len) {
         if (std.mem.startsWith(u8, template_content[i..], "${timestamp}")) {
             try result.appendSlice(allocator, ts_str);
             i += "${timestamp}".len;
+            found_timestamp = true;
             continue;
         }
 
@@ -532,12 +570,14 @@ pub fn performVersionFileUpload(
             if (std.mem.startsWith(u8, template_content[i..], "${version_name}")) {
                 try result.appendSlice(allocator, vn);
                 i += "${version_name}".len;
+                found_name = true;
                 continue;
             }
 
             if (std.mem.startsWith(u8, template_content[i..], "${name}")) {
                 try result.appendSlice(allocator, vn);
                 i += "${name}".len;
+                found_name = true;
                 continue;
             }
 
@@ -567,11 +607,12 @@ pub fn performVersionFileUpload(
                 } else if (has_quote) {
                     try result.append(allocator, '\"');
                 }
+                found_name = true;
                 continue;
             }
 
             if (is_ini and std.mem.startsWith(u8, template_content[i..], "name")) {
-                const is_start = (i == 0 or template_content[i - 1] == '\n');
+                const is_start = (i == 0 or template_content[i - 1] == '\n' or template_content[i - 1] == '\r');
                 if (is_start) {
                     try result.appendSlice(allocator, "name");
                     i += "name".len;
@@ -585,6 +626,7 @@ pub fn performVersionFileUpload(
                         i += 1;
                     }
                     try result.appendSlice(allocator, vn);
+                    found_name = true;
                     continue;
                 }
             }
@@ -603,12 +645,13 @@ pub fn performVersionFileUpload(
                 i += 1;
             }
             try result.appendSlice(allocator, ts_str);
+            found_timestamp = true;
             continue;
         }
 
         if (is_ini and std.mem.startsWith(u8, template_content[i..], "timestamp")) {
             // Check if it's the start of a line or after a newline
-            const is_start = (i == 0 or template_content[i - 1] == '\n');
+            const is_start = (i == 0 or template_content[i - 1] == '\n' or template_content[i - 1] == '\r');
             if (is_start) {
                 try result.appendSlice(allocator, "timestamp");
                 i += "timestamp".len;
@@ -622,7 +665,26 @@ pub fn performVersionFileUpload(
                     i += 1;
                 }
                 try result.appendSlice(allocator, ts_str);
+                found_timestamp = true;
                 continue;
+            }
+        }
+
+        // Special case for JSON: if we hit the LAST closing brace and haven't added fields, add them
+        if (is_json and template_content[i] == '}' and i == template_content.len - 1) {
+            if (!found_name and v_name != null) {
+                // If the result already has content beyond just '{', add a comma
+                if (result.items.len > 1) try result.appendSlice(allocator, ", ");
+                try result.appendSlice(allocator, "\"name\": \"");
+                try result.appendSlice(allocator, v_name.?);
+                try result.append(allocator, '\"');
+                found_name = true;
+            }
+            if (!found_timestamp) {
+                if (result.items.len > 1) try result.appendSlice(allocator, ", ");
+                try result.appendSlice(allocator, "\"timestamp\": ");
+                try result.appendSlice(allocator, ts_str);
+                found_timestamp = true;
             }
         }
 
@@ -631,13 +693,24 @@ pub fn performVersionFileUpload(
     }
 
     if (folder) |f| {
-        std.debug.print("[{s}] Uploading version file: {s} -> {s} (ts={})\n", .{ f.local_dir, version_from, version_to, now_secs });
+        if (config.dry_run) {
+            std.debug.print("[{s}] Dry-run: Would upload version file: {s} -> {s} (ts={})\n", .{ f.local_dir, version_from, version_to, now_secs });
+        } else {
+            std.debug.print("[{s}] Uploading version file: {s} -> {s} (ts={})\n", .{ f.local_dir, version_from, version_to, now_secs });
+            ssh.uploadBuffer(result.items, version_to, config.simple_log) catch |err| {
+                std.debug.print("Warning: Failed to upload version file: {s}\n", .{@errorName(err)});
+            };
+        }
     } else {
-        std.debug.print("Uploading global version file: {s} -> {s} (ts={})\n", .{ version_from, version_to, now_secs });
+        if (config.dry_run) {
+            std.debug.print("Dry-run: Would upload global version file: {s} -> {s} (ts={})\n", .{ version_from, version_to, now_secs });
+        } else {
+            std.debug.print("Uploading global version file: {s} -> {s} (ts={})\n", .{ version_from, version_to, now_secs });
+            ssh.uploadBuffer(result.items, version_to, config.simple_log) catch |err| {
+                std.debug.print("Warning: Failed to upload version file: {s}\n", .{@errorName(err)});
+            };
+        }
     }
-    ssh.uploadBuffer(result.items, version_to, config.simple_log) catch |err| {
-        std.debug.print("Warning: Failed to upload version file: {s}\n", .{@errorName(err)});
-    };
 }
 
 pub fn saveDatabase(

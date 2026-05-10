@@ -42,6 +42,7 @@ pub const Config = struct {
     compress: bool,
     simple_log: bool,
     cleanup: bool,
+    dry_run: bool,
     text_extensions: []const []const u8,
     folders: []Folder,
     local_copy_workers: []LocalCopyWorkerConfig,
@@ -81,6 +82,7 @@ pub const Config = struct {
         var cli_compress: bool = false;
         var cli_simple_log: bool = false;
         var cli_cleanup: bool = false;
+        var cli_dry_run: bool = false;
         var cli_watch_delay: ?u64 = null;
         var cli_exec_cmd: ?[]const u8 = null;
         var cli_watch: bool = false;
@@ -171,6 +173,8 @@ pub const Config = struct {
                 cli_simple_log = true;
             } else if (std.mem.eql(u8, arg, "--cleanup")) {
                 cli_cleanup = true;
+            } else if (std.mem.eql(u8, arg, "--dry-run")) {
+                cli_dry_run = true;
             } else if (std.mem.eql(u8, arg, "--watch-delay")) {
                 i += 1;
                 if (i >= raw_args.len) return error.MissingArgValue;
@@ -271,6 +275,7 @@ pub const Config = struct {
             .compress = cli_compress,
             .simple_log = cli_simple_log,
             .cleanup = cli_cleanup,
+            .dry_run = cli_dry_run,
             .watch = cli_watch,
             .color = resolved_color,
             .exec_cmd = if (cli_exec_cmd) |cmd| try arena_allocator.dupe(u8, cmd) else null,
@@ -572,9 +577,11 @@ pub const Config = struct {
                     } else if (environ.getAlloc(allocator, var_name)) |val| {
                         allocator.free(val); // real env var exists, skip default
                     } else |_| {
+                        // Expand using only vars collected so far (defined-before-use rule)
+                        const expanded_val = try expandVars(allocator, v, environ, cli_vars, &env_defaults);
+                        errdefer allocator.free(expanded_val);
                         const stored_key = try allocator.dupe(u8, var_name);
-                        const stored_val = try allocator.dupe(u8, v);
-                        try env_defaults.put(stored_key, stored_val);
+                        try env_defaults.put(stored_key, expanded_val);
                     }
                 }
             }
@@ -771,6 +778,8 @@ pub const Config = struct {
                     config.compress = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "yes");
                 } else if (std.mem.eql(u8, key, "cleanup")) {
                     config.cleanup = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "yes");
+                } else if (std.mem.eql(u8, key, "dry_run")) {
+                    config.dry_run = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "yes");
                 } else if (std.mem.eql(u8, key, "exec_cmd") or std.mem.eql(u8, key, "exec")) {
                     config.exec_cmd = try allocator.dupe(u8, value);
                 } else if (std.mem.eql(u8, key, "text_extensions")) {

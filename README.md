@@ -92,6 +92,7 @@ HOST=prod.example.com sync -c sync.conf
 | `--check hash\                       | mtime_size`                         | Change detection mode |
 | `--no-db`                            | Skip remote checksum database       |
 | `--cleanup`                          | Remove remote files missing locally |
+| `--dry-run`                          | Show changes without making them    |
 | `--exec <cmd>`                       | Run command on remote after sync    |
 | `--color` / `--no-color`             | Force or disable ANSI colors        |
 
