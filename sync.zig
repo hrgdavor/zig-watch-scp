@@ -87,7 +87,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Connecting to {s}@{s}...\n", .{ config.username, config.host });
 
     // Connect to SSH
-    var ssh = try SshSession.init(allocator, init.io, config.host, config.username, config.password, config.key_path, config.passphrase, config.compress, config.file_mode, config.dir_mode);
+    var ssh = try SshSession.init(allocator, init.io, init.minimal.environ, config.host, config.username, config.password, config.key_path, config.passphrase, config.compress, config.file_mode, config.dir_mode, config.verbose);
     defer ssh.deinit();
 
     std.debug.print("Connected successfully!\n", .{});
@@ -162,7 +162,7 @@ pub fn main(init: std.process.Init) !void {
                 std.mem.replaceScalar(u8, mutable_db_path, '\\', '/');
                 db_path = mutable_db_path;
 
-                std.debug.print("Downloading remote checksum database from {s}...\n", .{db_path});
+                if (config.verbose) std.debug.print("Downloading remote checksum database from {s}...\n", .{db_path});
                 var random_id: u64 = undefined;
                 init.io.random(std.mem.asBytes(&random_id));
                 var tmp_name: [64]u8 = undefined;
@@ -176,12 +176,12 @@ pub fn main(init: std.process.Init) !void {
                         defer allocator.free(content);
                         remote_db.deinit();
                         remote_db = try ChecksumDb.deserialize(allocator, content);
-                        std.debug.print("Loaded remote database with {} entries.\n", .{remote_db.entries.count()});
+                        if (config.verbose) std.debug.print("Loaded remote database with {} entries.\n", .{remote_db.entries.count()});
                     } else |_| {}
                 } else |err| {
                     ssh_worker.ssh_mutex.unlock(init.io);
                     if (err == error.RemoteFileOpenFailed) {
-                        std.debug.print("No remote database found, starting fresh sync.\n", .{});
+                        if (config.verbose) std.debug.print("No remote database found, starting fresh sync.\n", .{});
                     } else {
                         remote_db.deinit();
                         allocator.free(db_path);
@@ -190,17 +190,17 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
         } else {
-            std.debug.print("Skipping database (no_db mode enabled).\n", .{});
+            if (config.verbose) std.debug.print("Skipping database (no_db mode enabled).\n", .{});
         }
 
         // Perform initial sync with timing
         const t0 = std.Io.Timestamp.now(init.io, .boot);
-        if (try ssh_worker.performInitialSync(allocator, init.io, &config, folder, &ssh, &remote_db, db_path, printer)) {
+        if (try ssh_worker.performInitialSync(allocator, init.io, init.minimal.environ, &config, folder, &ssh, &remote_db, db_path, printer)) {
             any_changes = true;
         }
         const elapsed_ns = t0.durationTo(std.Io.Timestamp.now(init.io, .boot)).nanoseconds;
         const sync_duration = @as(f64, @floatFromInt(@as(i64, @intCast(elapsed_ns)))) / @as(f64, @floatFromInt(std.time.ns_per_s));
-        std.debug.print("Initial sync completed in {d:.2} seconds.\n\n", .{sync_duration});
+        std.debug.print("Initial sync completed in {d:.2} seconds for {s}.\n\n", .{ sync_duration, folder.local_dir });
 
         // Initialize watcher
         const watcher_inst = try ssh_worker.Watcher.init(allocator, init.io, folder.local_dir);

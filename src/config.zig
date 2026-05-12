@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
 const app_version = @import("app_version.zig");
+const path_util = @import("path_util.zig");
 
 pub const CheckMode = enum { hash, mtime_size };
 
@@ -49,6 +50,7 @@ pub const Config = struct {
     local_copy_workers: []LocalCopyWorkerConfig,
     exec_cmd: ?[]const u8,
     watch: bool,
+    verbose: bool,
     color: bool,
     file_mode: u32,
     dir_mode: u32,
@@ -87,6 +89,7 @@ pub const Config = struct {
         var cli_watch_delay: ?u64 = null;
         var cli_exec_cmd: ?[]const u8 = null;
         var cli_watch: bool = false;
+        var cli_verbose: bool = false;
         var cli_color: ?bool = null;
         var config_path: ?[]const u8 = null;
         var cli_host: ?[]const u8 = null;
@@ -168,6 +171,8 @@ pub const Config = struct {
                 cli_color = true;
             } else if (std.mem.eql(u8, arg, "--no-color")) {
                 cli_color = false;
+            } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+                cli_verbose = true;
             } else if (std.mem.eql(u8, arg, "-w") or std.mem.eql(u8, arg, "--watch")) {
                 cli_watch = true;
             } else if (std.mem.eql(u8, arg, "--simple-log")) {
@@ -258,7 +263,15 @@ pub const Config = struct {
         }
 
         // ── validation ────────────────────────────────────────────────────────
-        if (config_path == null and create_folder == null and get_file == null and put_file == null) {
+        if (config_path == null and create_folder == null and get_file == null and put_file == null and positionals.items.len == 0) {
+            // Automatically look for sync.conf in the current directory if no config is provided
+            if (std.Io.Dir.accessAbsolute(init.io, "sync.conf", .{})) |_| {
+                config_path = "sync.conf";
+                std.debug.print("No config specified, using default: sync.conf\n", .{});
+            } else |_| {
+                return error.MissingArguments;
+            }
+        } else if (config_path == null and create_folder == null and get_file == null and put_file == null) {
             return error.MissingArguments;
         }
 
@@ -278,6 +291,7 @@ pub const Config = struct {
             .cleanup = cli_cleanup,
             .dry_run = cli_dry_run,
             .watch = cli_watch,
+            .verbose = cli_verbose,
             .color = resolved_color,
             .exec_cmd = if (cli_exec_cmd) |cmd| try arena_allocator.dupe(u8, cmd) else null,
             .file_mode = 0o644,
@@ -288,11 +302,11 @@ pub const Config = struct {
             .text_extensions = try createDefaultTextExtensions(arena_allocator),
             .folders = try arena_allocator.alloc(Folder, 0),
             .local_copy_workers = try arena_allocator.alloc(LocalCopyWorkerConfig, 0),
-            .create_folder = if (create_folder) |f| try arena_allocator.dupe(u8, f) else null,
+            .create_folder = if (create_folder) |f| try path_util.expandHomeAndNormalize(arena_allocator, init.minimal.environ, f) else null,
             .create_includes = try create_includes.toOwnedSlice(arena_allocator),
             .create_excludes = try create_excludes.toOwnedSlice(arena_allocator),
-            .get_file = if (get_file) |gf| .{ try arena_allocator.dupe(u8, gf[0]), try arena_allocator.dupe(u8, gf[1]) } else null,
-            .put_file = if (put_file) |pf| .{ try arena_allocator.dupe(u8, pf[0]), try arena_allocator.dupe(u8, pf[1]) } else null,
+            .get_file = if (get_file) |gf| .{ try arena_allocator.dupe(u8, gf[0]), try path_util.expandHomeAndNormalize(arena_allocator, init.minimal.environ, gf[1]) } else null,
+            .put_file = if (put_file) |pf| .{ try path_util.expandHomeAndNormalize(arena_allocator, init.minimal.environ, pf[0]), try arena_allocator.dupe(u8, pf[1]) } else null,
         };
 
         // Standalone create mode – no SSH config needed
@@ -302,7 +316,11 @@ pub const Config = struct {
 
         // ── read config file ──────────────────────────────────────────────────
         if (config_path) |cp| {
-            try parseIntoConfig(arena_allocator, init.io, init.minimal.environ, cli_vars, &config, cp);
+            const expanded_cp = try path_util.expandHomeAndNormalize(arena_allocator, init.minimal.environ, cp);
+            if (config.verbose) std.debug.print("Loading configuration from: {s}\n", .{expanded_cp});
+            // We don't strictly need to free expanded_cp since it's in the arena,
+            // but for consistency we use the expanded version.
+            try parseIntoConfig(arena_allocator, init.io, init.minimal.environ, cli_vars, &config, expanded_cp);
         }
 
         // Resolve SSH config before environment fallbacks and validation
@@ -357,25 +375,13 @@ pub const Config = struct {
     }
 
     pub fn resolveSshConfig(allocator: std.mem.Allocator, init: std.process.Init, config: *Config) !void {
-        var home_path: ?[]u8 = null;
-        if (init.minimal.environ.getAlloc(allocator, "USERPROFILE")) |val| {
-            home_path = val;
-        } else |_| {
-            if (init.minimal.environ.getAlloc(allocator, "HOME")) |val| {
-                home_path = val;
-            } else |_| {}
-        }
-        defer if (home_path) |hp| allocator.free(hp);
-
-        if (home_path == null) return;
-
-        const ssh_config_path = try std.fs.path.join(allocator, &.{ home_path.?, ".ssh", "config" });
+        const ssh_config_path = try path_util.expandHomeAndNormalize(allocator, init.minimal.environ, "~/.ssh/config");
         defer allocator.free(ssh_config_path);
 
-        try resolveSshConfigFile(allocator, init.io, config, ssh_config_path, home_path.?);
+        try resolveSshConfigFile(allocator, init.io, init.minimal.environ, config, ssh_config_path);
     }
 
-    pub fn resolveSshConfigFile(allocator: std.mem.Allocator, io: std.Io, config: *Config, path: []const u8, home_path: []const u8) !void {
+    pub fn resolveSshConfigFile(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, config: *Config, path: []const u8) !void {
         if (config.host.len == 0) return;
 
         const content = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024))) catch |err| {
@@ -418,12 +424,7 @@ pub const Config = struct {
                 } else if (std.ascii.eqlIgnoreCase(key, "Port")) {
                     resolved_port = try allocator.dupe(u8, value);
                 } else if (std.ascii.eqlIgnoreCase(key, "IdentityFile")) {
-                    if (std.mem.startsWith(u8, value, "~")) {
-                        const rel_path = std.mem.trimStart(u8, value[1..], "/\\");
-                        resolved_key = try std.fs.path.join(allocator, &.{ home_path, rel_path });
-                    } else {
-                        resolved_key = try allocator.dupe(u8, value);
-                    }
+                    resolved_key = try path_util.expandHomeAndNormalize(allocator, environ, value);
                 }
             }
         }
@@ -451,12 +452,14 @@ pub const Config = struct {
 
             if (resolved_user) |u| {
                 if (config.username.len == 0) {
+                    if (config.verbose) std.debug.print("Resolved username '{s}' from SSH config\n", .{u});
                     allocator.free(config.username);
                     config.username = u;
                 } else allocator.free(u);
             }
             if (resolved_key) |k| {
                 if (config.key_path.len == 0) {
+                    if (config.verbose) std.debug.print("Resolved key_path '{s}' from SSH config\n", .{k});
                     allocator.free(config.key_path);
                     config.key_path = k;
                 } else allocator.free(k);
@@ -748,10 +751,12 @@ pub const Config = struct {
                     config.host = try allocator.dupe(u8, value);
                 } else if (std.mem.eql(u8, key, "username") and config.username.len == 0) {
                     config.username = try allocator.dupe(u8, value);
+                    if (config.verbose) std.debug.print("  Loaded username: {s}\n", .{config.username});
                 } else if (std.mem.eql(u8, key, "password") and config.password.len == 0) {
                     config.password = try allocator.dupe(u8, value);
-                } else if (std.mem.eql(u8, key, "key_path") and config.key_path.len == 0) {
-                    config.key_path = try allocator.dupe(u8, value);
+                } else if ((std.mem.eql(u8, key, "key_path") or std.mem.eql(u8, key, "key")) and config.key_path.len == 0) {
+                    config.key_path = try path_util.expandHomeAndNormalize(allocator, environ, value);
+                    if (config.verbose) std.debug.print("  Loaded key_path: {s}\n", .{config.key_path});
                 } else if (std.mem.eql(u8, key, "passphrase") and config.passphrase.len == 0) {
                     config.passphrase = try allocator.dupe(u8, value);
                 } else if (std.mem.eql(u8, key, "parallel_threads")) {
@@ -760,15 +765,15 @@ pub const Config = struct {
                     config.watch_delay_ms = try std.fmt.parseInt(u64, value, 10);
                 } else if (std.mem.eql(u8, key, "version_from")) {
                     if (section == .global) {
-                        config.version_from = try allocator.dupe(u8, value);
+                        config.version_from = try path_util.expandHomeAndNormalize(allocator, environ, value);
                     } else if (section == .folder or section == .file) {
-                        cur_version_from = try allocator.dupe(u8, value);
+                        cur_version_from = try path_util.expandHomeAndNormalize(allocator, environ, value);
                     }
                 } else if (std.mem.eql(u8, key, "version_to")) {
                     if (section == .global) {
-                        config.version_to = try allocator.dupe(u8, value);
+                        config.version_to = try allocator.dupe(u8, value); // typically remote
                     } else if (section == .folder or section == .file) {
-                        cur_version_to = try allocator.dupe(u8, value);
+                        cur_version_to = try allocator.dupe(u8, value); // typically remote
                     }
                 } else if (std.mem.eql(u8, key, "version_name")) {
                     if (section == .global) {
@@ -793,22 +798,22 @@ pub const Config = struct {
                     config.text_extensions = try ext_list.toOwnedSlice(allocator);
                 } else if (std.mem.eql(u8, key, "local_dir")) {
                     if (section != .folder and section != .source) continue;
-                    cur_local_dir = try allocator.dupe(u8, value);
+                    cur_local_dir = try path_util.expandHomeAndNormalize(allocator, environ, value);
                 } else if (std.mem.eql(u8, key, "local_file")) {
                     if (section != .file) continue;
                     const dir = std.fs.path.dirname(value) orelse ".";
                     const name = std.fs.path.basename(value);
-                    cur_local_dir = try allocator.dupe(u8, dir);
+                    cur_local_dir = try path_util.expandHomeAndNormalize(allocator, environ, dir);
                     try cur_includes.append(allocator, try allocator.dupe(u8, name));
                 } else if (std.mem.eql(u8, key, "remote_dir")) {
                     if (section != .folder and section != .file) continue;
                     cur_remote_dir = try allocator.dupe(u8, value);
                 } else if (std.mem.eql(u8, key, "dest_dir")) {
                     if (section != .local_folder) continue;
-                    cur_dest_dir = try allocator.dupe(u8, value);
+                    cur_dest_dir = try path_util.expandHomeAndNormalize(allocator, environ, value);
                 } else if (std.mem.eql(u8, key, "scpdb")) {
                     if (section != .folder) continue;
-                    cur_scpdb = try allocator.dupe(u8, value);
+                    cur_scpdb = try path_util.expandHomeAndNormalize(allocator, environ, value);
                 } else if (std.mem.eql(u8, key, "include") or std.mem.eql(u8, key, "includes")) {
                     if (section != .folder and section != .source) continue;
                     var it = std.mem.tokenizeAny(u8, value, ", \t");
@@ -823,7 +828,7 @@ pub const Config = struct {
                     }
                 } else if (std.mem.eql(u8, key, "trigger_from")) {
                     if (section == .folder or section == .file) {
-                        cur_trigger_from = try allocator.dupe(u8, value);
+                        cur_trigger_from = try path_util.expandHomeAndNormalize(allocator, environ, value);
                     }
                 } else if (std.mem.eql(u8, key, "trigger_to")) {
                     if (section == .folder or section == .file) {

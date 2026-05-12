@@ -3,6 +3,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c");
+const path_util = @import("path_util.zig");
 
 pub const SshSession = struct {
     session: *c.LIBSSH2_SESSION,
@@ -57,6 +58,7 @@ pub const SshSession = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
+        environ: std.process.Environ,
         host: []const u8,
         username: []const u8,
         password: []const u8,
@@ -65,6 +67,7 @@ pub const SshSession = struct {
         compress: bool,
         file_mode: u32,
         dir_mode: u32,
+        verbose: bool,
     ) !SshSession {
         // Note: libssh2_init should be called once in main() for thread safety
         // if (c.libssh2_init(0) != 0) {
@@ -133,9 +136,9 @@ pub const SshSession = struct {
         defer allocator.free(username_z);
 
         // Attempt agent authentication first
-        std.debug.print("Attempting SSH agent authentication for user '{s}'...\n", .{username});
+        if (verbose) std.debug.print("Attempting SSH agent authentication for user '{s}'...\n", .{username});
         if (tryAgentAuth(session, username)) {
-            std.debug.print("SSH agent authentication successful!\n", .{});
+            if (verbose) std.debug.print("SSH agent authentication successful!\n", .{});
             return SshSession{
                 .session = session,
                 .sock = sock,
@@ -148,11 +151,15 @@ pub const SshSession = struct {
         }
 
         if (key_path.len > 0) {
-            const key_path_z = try allocator.dupeZ(u8, key_path);
+            const expanded_path = try path_util.expandHomeAndNormalize(allocator, environ, key_path);
+            defer allocator.free(expanded_path);
+
+            const key_path_z = try allocator.dupeZ(u8, expanded_path);
             defer allocator.free(key_path_z);
-            // Normalize in place
-            for (key_path_z) |*c_ptr| {
-                if (c_ptr.* == '\\') c_ptr.* = '/';
+            if (builtin.os.tag == .windows) {
+                for (key_path_z) |*char| {
+                    if (char.* == '/') char.* = '\\';
+                }
             }
 
             // Try to use .pub file if it exists, otherwise pass null to let libssh2 derive it
@@ -166,12 +173,14 @@ pub const SshSession = struct {
                 return error.PpkNotSupported;
             }
 
-            std.debug.print("libssh2 version: {s}\n", .{c.libssh2_version(0)});
-            std.debug.print("Trying Key File authentication for user '{s}' with key '{s}'\n", .{ username, key_path_z });
+            if (verbose) {
+                std.debug.print("libssh2 version: {s}\n", .{c.libssh2_version(0)});
+                std.debug.print("Trying Key File authentication for user '{s}' with key '{s}'\n", .{ username, key_path_z });
+            }
 
             // Verify file accessibility
             std.Io.Dir.accessAbsolute(io, key_path_z, .{}) catch |err| {
-                std.debug.print("Error: Cannot access private key file {s}: {s}\n", .{ key_path_z, @errorName(err) });
+                if (verbose) std.debug.print("Error: Cannot access private key file {s}: {s}\n", .{ key_path_z, @errorName(err) });
                 return error.KeyReadFailed;
             };
 
@@ -183,11 +192,9 @@ pub const SshSession = struct {
             if (std.Io.Dir.accessAbsolute(io, pub_key_path, .{})) |_| {
                 pub_key_path_z = try allocator.dupeZ(u8, pub_key_path);
                 pub_key_content = std.Io.Dir.cwd().readFileAlloc(io, pub_key_path, allocator, @as(std.Io.Limit, @enumFromInt(4096))) catch null;
-                if (pub_key_content) |_| {
-                    std.debug.print("Found and read public key file: {s}\n", .{pub_key_path});
-                }
+                if (verbose) std.debug.print("Found and read public key file: {s}\n", .{pub_key_path});
             } else |_| {
-                std.debug.print("No .pub file found at {s}\n", .{pub_key_path});
+                if (verbose) std.debug.print("No .pub file found at {s}\n", .{pub_key_path});
             }
             defer if (pub_key_path_z) |p| allocator.free(p);
             defer if (pub_key_content) |c_val| allocator.free(c_val);
@@ -197,42 +204,85 @@ pub const SshSession = struct {
             const passphrase_ptr = if (passphrase_z) |p| p.ptr else null;
 
             // Attempt public key authentication from file
-            std.debug.print("Trying public key authentication (fromfile_ex)...\n", .{});
+            // First try with NULL for public key path, letting libssh2 derive it from the private key.
+            // This is more reliable for modern OpenSSH/PEM formats and avoids mismatches with .pub files.
+            if (verbose) std.debug.print("Trying public key authentication (fromfile_ex, pubkey=NULL)...\n", .{});
             var auth_result = c.libssh2_userauth_publickey_fromfile_ex(
                 session,
                 username_z.ptr,
                 @intCast(username.len),
-                if (pub_key_path_z) |p| p.ptr else null,
+                null,
                 key_path_z.ptr,
                 passphrase_ptr,
             );
 
             if (auth_result != 0) {
-                std.debug.print("fromfile_ex result: {} / 0x{X}\n", .{ auth_result, @as(u32, @bitCast(auth_result)) });
-                printLastError(session, "Public key auth (file) failed");
+                if (verbose) printLastError(session, "  - Result with pubkey=NULL");
+                if (pub_key_path_z) |p| {
+                    if (verbose) std.debug.print("Trying with .pub file: {s}\n", .{p});
+                    auth_result = c.libssh2_userauth_publickey_fromfile_ex(
+                        session,
+                        username_z.ptr,
+                        @intCast(username.len),
+                        p.ptr,
+                        key_path_z.ptr,
+                        passphrase_ptr,
+                    );
+                    if (auth_result != 0) {
+                        if (verbose) printLastError(session, "  - Result with .pub file");
+                    }
+                }
+            }
+
+            if (auth_result != 0) {
+                if (verbose) {
+                    std.debug.print("fromfile_ex result: {} / 0x{X}\n", .{ auth_result, @as(u32, @bitCast(auth_result)) });
+                    printLastError(session, "Public key auth (file) failed");
+                }
 
                 // Try frommemory as fallback
-                std.debug.print("Trying public key authentication (frommemory)...\n", .{});
+                if (verbose) std.debug.print("Trying public key authentication (frommemory, pubkey=NULL)...\n", .{});
                 const priv_key_raw = std.Io.Dir.cwd().readFileAlloc(io, key_path_z, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024))) catch |err| {
                     std.debug.print("Error reading private key file: {s}\n", .{@errorName(err)});
                     return error.KeyReadFailed;
                 };
                 defer allocator.free(priv_key_raw);
+                const pub_key_raw = if (pub_key_path_z) |p| std.Io.Dir.cwd().readFileAlloc(io, p, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024))) catch null else null;
+                defer if (pub_key_raw) |pr| allocator.free(pr);
 
                 auth_result = c.libssh2_userauth_publickey_frommemory(
                     session,
                     username_z.ptr,
                     @intCast(username.len),
-                    if (pub_key_content) |c_val| c_val.ptr else null,
-                    if (pub_key_content) |c_val| c_val.len else 0,
+                    null,
+                    0,
                     priv_key_raw.ptr,
                     @intCast(priv_key_raw.len),
                     passphrase_ptr,
                 );
-            }
 
+                if (auth_result != 0) {
+                    if (verbose) printLastError(session, "  - Result frommemory with pubkey=NULL");
+                    if (pub_key_raw) |pkr| {
+                        if (verbose) std.debug.print("Trying with .pub content\n", .{});
+                        auth_result = c.libssh2_userauth_publickey_frommemory(
+                            session,
+                            username_z.ptr,
+                            @intCast(username.len),
+                            pkr.ptr,
+                            pkr.len,
+                            priv_key_raw.ptr,
+                            @intCast(priv_key_raw.len),
+                            passphrase_ptr,
+                        );
+                        if (auth_result != 0) {
+                            if (verbose) printLastError(session, "  - Result frommemory with .pub content");
+                        }
+                    }
+                }
+            }
             if (auth_result == 0) {
-                std.debug.print("Key-based authentication successful!\n", .{});
+                if (verbose) std.debug.print("Key-based authentication successful!\n", .{});
                 return SshSession{
                     .session = session,
                     .sock = sock,
@@ -242,66 +292,42 @@ pub const SshSession = struct {
                     .file_mode = file_mode,
                     .dir_mode = dir_mode,
                 };
-            } else {
+            }
+
+            if (verbose) {
                 std.debug.print("All key-based authentication failed (final result: {} / 0x{X})\n", .{ auth_result, @as(u32, @bitCast(auth_result)) });
                 printLastError(session, "Key-based auth failed");
-
-                // Final fallback to password
-                if (password.len > 0) {
-                    std.debug.print("Trying password fallback...\n", .{});
-                    const password_z = try allocator.dupeZ(u8, password);
-                    defer allocator.free(password_z);
-                    if (c.libssh2_userauth_password_ex(
-                        session,
-                        username_z.ptr,
-                        @intCast(username.len),
-                        password_z.ptr,
-                        @intCast(password.len),
-                        null,
-                    ) == 0) {
-                        std.debug.print("Password authentication successful!\n", .{});
-                        return SshSession{
-                            .session = session,
-                            .sock = sock,
-                            .allocator = allocator,
-                            .io = io,
-                            .sftp = null,
-                            .file_mode = file_mode,
-                            .dir_mode = dir_mode,
-                        };
-                    } else {
-                        printLastError(session, "Password authentication failed");
-                    }
-                }
-                return error.AuthenticationFailed;
             }
         }
 
         // Fall back to password auth
-        const password_z = try allocator.dupeZ(u8, password);
-        defer allocator.free(password_z);
+        if (password.len > 0) {
+            if (verbose) std.debug.print("Trying password authentication...\n", .{});
+            const password_z = try allocator.dupeZ(u8, password);
+            defer allocator.free(password_z);
 
-        if (c.libssh2_userauth_password_ex(
-            session,
-            username_z.ptr,
-            @intCast(username.len),
-            password_z.ptr,
-            @intCast(password.len),
-            null,
-        ) != 0) {
+            if (c.libssh2_userauth_password_ex(
+                session,
+                username_z.ptr,
+                @intCast(username.len),
+                password_z.ptr,
+                @intCast(password.len),
+                null,
+            ) == 0) {
+                if (verbose) std.debug.print("Password authentication successful!\n", .{});
+                return SshSession{
+                    .session = session,
+                    .sock = sock,
+                    .allocator = allocator,
+                    .io = io,
+                    .sftp = null,
+                    .file_mode = file_mode,
+                    .dir_mode = dir_mode,
+                };
+            }
             printLastError(session, "Password authentication failed");
-            return error.AuthenticationFailed;
         }
-
-        return SshSession{
-            .session = session,
-            .sock = sock,
-            .allocator = allocator,
-            .io = io,
-            .sftp = null,
-            .file_mode = file_mode,
-            .dir_mode = dir_mode,
-        };
+        return error.AuthenticationFailed;
     }
 
     pub fn deinit(self: *SshSession) void {

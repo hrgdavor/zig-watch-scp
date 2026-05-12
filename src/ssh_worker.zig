@@ -23,6 +23,7 @@ pub const FolderSync = struct {
 pub fn performInitialSync(
     allocator: std.mem.Allocator,
     io: std.Io,
+    environ: std.process.Environ,
     config: *const Config,
     folder: *const Folder,
     ssh: *SshSession,
@@ -30,11 +31,10 @@ pub fn performInitialSync(
     remote_db_path: []const u8,
     printer: ansi.Printer,
 ) !bool {
-    std.debug.print("Scanning local directory: {s}\n", .{folder.local_dir});
     var scanner = Scanner.init(allocator, io, config, folder);
     defer scanner.deinit();
     try scanner.scanDirectory();
-    std.debug.print("Found {} local files.\n", .{scanner.files.items.len});
+    if (config.verbose) std.debug.print("Found {} local files.\n", .{scanner.files.items.len});
 
     var changed_files = try scanner.getChangedFiles(remote_db);
     defer {
@@ -45,7 +45,7 @@ pub fn performInitialSync(
     }
 
     if (changed_files.items.len == 0) {
-        std.debug.print("Folder {s} is up to date!\n", .{folder.local_dir});
+        if (config.verbose) std.debug.print("Folder {s} is up to date!\n", .{folder.local_dir});
         return false;
     }
 
@@ -71,6 +71,7 @@ pub fn performInitialSync(
         var work_ctx = WorkContext{
             .allocator = allocator,
             .io = io,
+            .environ = environ,
             .config = config,
             .folder = folder,
             .ssh = ssh,
@@ -137,7 +138,6 @@ pub fn performInitialSync(
     try performSyncTrigger(allocator, config, folder, ssh);
     try performVersionFileUpload(allocator, io, config, folder, ssh);
 
-    std.debug.print("Initial sync complete for {s}!\n", .{folder.local_dir});
     return true;
 }
 
@@ -193,6 +193,7 @@ pub fn performCleanup(
 pub const WorkContext = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    environ: std.process.Environ,
     config: *const Config,
     folder: *const Folder,
     ssh: *SshSession,
@@ -214,6 +215,7 @@ pub fn uploadWorker(ctx: *WorkContext) void {
     local_ssh = SshSession.init(
         ctx.allocator,
         ctx.io,
+        ctx.environ,
         ctx.config.host,
         ctx.config.username,
         ctx.config.password,
@@ -222,6 +224,7 @@ pub fn uploadWorker(ctx: *WorkContext) void {
         ctx.config.compress,
         ctx.config.file_mode,
         ctx.config.dir_mode,
+        ctx.config.verbose,
     ) catch |err| {
         std.debug.print("Worker failed to connect: {s}\n", .{@errorName(err)});
         ctx.mutex.lock(ctx.io) catch {};

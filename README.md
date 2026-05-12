@@ -96,6 +96,14 @@ HOST=prod.example.com sync -c sync.conf
 | `--exec <cmd>`                       | Run command on remote after sync    |
 | `--color` / `--no-color`             | Force or disable ANSI colors        |
 
+## priv pub key pairs
+
+Version of libssl used here does not play well with new ssl formats, so use pem instead
+
+```shell
+ssh-keygen -t rsa -b 4096 -m PEM -f ~/my.devkey.rsa.pem
+```
+
 ## Full Documentation
 
 → **[DOCUMENTATION.md](DOCUMENTATION.md)** — complete config reference, all CLI options, SSH agent setup, ACL permissions, version files, glob patterns, and more.
