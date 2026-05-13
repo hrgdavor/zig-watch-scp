@@ -125,7 +125,7 @@ pub fn main(init: std.process.Init) !void {
     defer {
         for (folder_syncs[0..folder_syncs_count]) |*fs| {
             fs.remote_db.deinit();
-            allocator.free(fs.remote_db_path);
+            if (fs.remote_db_path.len > 0) allocator.free(fs.remote_db_path);
             fs.watcher.deinit();
         }
         allocator.free(folder_syncs);
@@ -137,7 +137,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Setup DB path and load database
         const is_absolute_db = std.fs.path.isAbsolute(folder.scpdb);
-        var db_path: []const u8 = try allocator.dupe(u8, ""); // empty default
+        var db_path: []const u8 = ""; // empty default (literal, no allocation)
         var remote_db = ChecksumDb.init(allocator);
 
         if (!folder.no_db) {
@@ -184,7 +184,7 @@ pub fn main(init: std.process.Init) !void {
                         if (config.verbose) std.debug.print("No remote database found, starting fresh sync.\n", .{});
                     } else {
                         remote_db.deinit();
-                        allocator.free(db_path);
+                        if (db_path.len > 0) allocator.free(db_path);
                         return err;
                     }
                 }

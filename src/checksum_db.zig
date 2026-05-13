@@ -35,7 +35,11 @@ pub const ChecksumDb = struct {
     pub fn put(self: *ChecksumDb, path: []const u8, hash: u64, mtime: i64, size: u64) !void {
         const owned_path = try self.allocator.dupe(u8, path);
         std.mem.replaceScalar(u8, owned_path, '\\', '/');
-        try self.entries.put(owned_path, .{ .hash = hash, .mtime = mtime, .size = size });
+        const gop = try self.entries.getOrPut(owned_path);
+        if (gop.found_existing) {
+            self.allocator.free(owned_path); // Use the existing key instead
+        }
+        gop.value_ptr.* = .{ .hash = hash, .mtime = mtime, .size = size };
     }
 
     pub fn get(self: *const ChecksumDb, path: []const u8) ?DbEntry {
