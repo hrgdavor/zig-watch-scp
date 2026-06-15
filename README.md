@@ -40,7 +40,7 @@ The tool syncs only changed files on startup, then watches and re-syncs on every
 - **Version file** — automatically writes a timestamped JSON/INI "heartbeat" to the remote on each sync
 - **Sync trigger** — touch a remote file after sync to kick off a CI/CD pipeline
 - **Config variables** — reuse one config across environments with `${VARNAME}` expansion and `--var` overrides
-- **Local copy worker** — sync between local directories without SSH
+- **Local copy worker** - sync between local directories without SSH
 - **stdin config** — pipe or heredoc a config with `-c -`
 - **Colored output** — ANSI colors auto-detected; `--color` / `--no-color` to override
 
