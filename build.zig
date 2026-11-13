@@ -9,11 +9,6 @@ pub fn build(b: *std.Build) void {
 
     const use_zlib = target.result.os.tag != .windows;
 
-    const zlib_dep = if (use_zlib) b.dependency("zlib", .{
-        .target = target,
-        .optimize = optimize,
-    }) else null;
-
     const mbedtls_dep = b.dependency("mbedtls", .{
         .target = target,
         .optimize = optimize,
@@ -34,9 +29,8 @@ pub fn build(b: *std.Build) void {
         // in the channel-write drain loop (notably at the first SFTP write).
         ssh2_lib.root_module.addCMacro("HAVE_O_NONBLOCK", "1");
     }
-    if (use_zlib) {
-        ssh2_lib.root_module.linkLibrary(zlib_dep.?.artifact("z"));
-    }
+    // libssh2 pulls in its own pinned zlib dependency when `use_zlib` is enabled.
+    // No separate top-level zlib dependency is needed.
     ssh2_lib.root_module.linkLibrary(mbedtls_dep.artifact("mbedtls"));
 
     const exe = b.addExecutable(.{
@@ -48,9 +42,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    if (use_zlib) {
-        exe.root_module.linkLibrary(zlib_dep.?.artifact("z"));
-    }
     exe.root_module.linkLibrary(mbedtls_dep.artifact("mbedtls"));
     exe.root_module.linkLibrary(libssh2_dep.artifact("ssh2"));
     exe.root_module.link_libc = true;
