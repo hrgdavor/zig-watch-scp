@@ -147,7 +147,7 @@ pub fn main(init: std.process.Init) !void {
                 else
                     try std.fs.path.resolve(allocator, &[_][]const u8{ folder.local_dir, folder.scpdb });
 
-                if (std.Io.Dir.cwd().readFileAlloc(init.io, db_path, allocator, @as(std.Io.Limit, @enumFromInt(10 * 1024 * 1024)))) |content| {
+                if (std.Io.Dir.cwd().readFileAlloc(init.io, db_path, allocator, std.Io.Limit.limited(10 * 1024 * 1024))) |content| {
                     defer allocator.free(content);
                     remote_db.deinit();
                     remote_db = try ChecksumDb.deserialize(allocator, content);
@@ -171,7 +171,7 @@ pub fn main(init: std.process.Init) !void {
                 ssh_worker.ssh_mutex.lock(init.io) catch {};
                 if (ssh.downloadFile(db_path, tmp_path)) |_| {
                     ssh_worker.ssh_mutex.unlock(init.io);
-                    if (std.Io.Dir.cwd().readFileAlloc(init.io, tmp_path, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024)))) |content| {
+                    if (std.Io.Dir.cwd().readFileAlloc(init.io, tmp_path, allocator, std.Io.Limit.limited(1024 * 1024))) |content| {
                         defer std.Io.Dir.cwd().deleteFile(init.io, tmp_path) catch {};
                         defer allocator.free(content);
                         remote_db.deinit();

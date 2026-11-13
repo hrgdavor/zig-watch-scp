@@ -2,7 +2,7 @@
 
 Watch local directories and instantly sync changed files to a remote server over SSH/SCP — with checksum-based deduplication so only what changed gets transferred.
 
-Written in Zig 0.16. No runtime, no JVM, single binary.
+Written in Zig 0.17. No runtime, no JVM, single binary.
 
 ## Quick Start
 

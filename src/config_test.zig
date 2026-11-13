@@ -19,11 +19,10 @@ test "config: parse text_extensions, include, and exclude" {
     ;
 
     const tmp_file_path = "test_sync.conf";
-    var io = try std.Io.init(allocator, .{});
-    defer io.deinit();
+    const io = std.testing.io;
 
     const file = try std.Io.Dir.cwd().createFile(io, tmp_file_path, .{});
-    try file.writeAll(io, file_content);
+    try file.writeStreamingAll(io, file_content);
     file.close(io);
     defer std.Io.Dir.cwd().deleteFile(io, tmp_file_path) catch {};
 
@@ -38,6 +37,15 @@ test "config: parse text_extensions, include, and exclude" {
         .compress = false,
         .simple_log = false,
         .cleanup = false,
+        .dry_run = false,
+        .watch = false,
+        .verbose = false,
+        .color = false,
+        .file_mode = 0o644,
+        .dir_mode = 0o755,
+        .version_from = null,
+        .version_to = null,
+        .version_name = null,
         .text_extensions = try allocator.alloc([]const u8, 0),
         .folders = try allocator.alloc(config.Folder, 0),
         .local_copy_workers = try allocator.alloc(config.LocalCopyWorkerConfig, 0),
@@ -84,7 +92,10 @@ test "config: parse text_extensions, include, and exclude" {
         allocator.free(cfg.create_excludes);
     }
 
-    try config.Config.parseIntoConfig(allocator, io, &cfg, tmp_file_path);
+    var cli_vars = std.StringHashMap([]const u8).init(allocator);
+    defer cli_vars.deinit();
+
+    try config.Config.parseIntoConfig(allocator, io, std.testing.environ, cli_vars, &cfg, tmp_file_path);
 
     // Verify text_extensions
     try std.testing.expectEqual(@as(usize, 3), cfg.text_extensions.len);
@@ -108,11 +119,10 @@ test "ssh_config: resolution" {
     ;
 
     const tmp_ssh_path = "test_ssh_config";
-    var io = try std.Io.init(allocator, .{});
-    defer io.deinit();
+    const io = std.testing.io;
 
     const file = try std.Io.Dir.cwd().createFile(io, tmp_ssh_path, .{});
-    try file.writeAll(io, ssh_config_content);
+    try file.writeStreamingAll(io, ssh_config_content);
     file.close(io);
     defer std.Io.Dir.cwd().deleteFile(io, tmp_ssh_path) catch {};
 
@@ -127,6 +137,15 @@ test "ssh_config: resolution" {
         .compress = false,
         .simple_log = false,
         .cleanup = false,
+        .dry_run = false,
+        .watch = false,
+        .verbose = false,
+        .color = false,
+        .file_mode = 0o644,
+        .dir_mode = 0o755,
+        .version_from = null,
+        .version_to = null,
+        .version_name = null,
         .text_extensions = try allocator.alloc([]const u8, 0),
         .folders = try allocator.alloc(config.Folder, 0),
         .local_copy_workers = try allocator.alloc(config.LocalCopyWorkerConfig, 0),
@@ -150,15 +169,15 @@ test "ssh_config: resolution" {
         allocator.free(cfg.create_excludes);
     }
 
-    const abs_path = try std.Io.Dir.cwd().realpathAlloc(io, allocator, tmp_ssh_path);
+    const abs_path = try std.Io.Dir.cwd().realPathFileAlloc(io, tmp_ssh_path, allocator);
     defer allocator.free(abs_path);
 
-    try config.Config.resolveSshConfigFile(allocator, io, &cfg, abs_path, "/home/testuser");
+    try config.Config.resolveSshConfigFile(allocator, io, std.testing.environ, &cfg, abs_path);
 
     try std.testing.expectEqualStrings("1.2.3.4:2222", cfg.host);
     try std.testing.expectEqualStrings("myuser", cfg.username);
-    // IdentityFile should be expanded (note: we passed /home/testuser as home_path)
+    // IdentityFile should be expanded to an absolute path under the current user's home.
     try std.testing.expect(std.mem.indexOf(u8, cfg.key_path, "id_rsa_test") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cfg.key_path, "testuser") != null);
+    try std.testing.expect(std.fs.path.isAbsolute(cfg.key_path));
 }
 

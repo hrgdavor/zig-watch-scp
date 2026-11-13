@@ -5,7 +5,7 @@ const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode") orelse .ReleaseSafe;
+    const optimize = b.option(std.lang.Optimize, "optimize", "Optimization mode") orelse .safe;
 
     const use_zlib = target.result.os.tag != .windows;
 
@@ -28,6 +28,12 @@ pub fn build(b: *std.Build) void {
     });
 
     const ssh2_lib = libssh2_dep.artifact("ssh2");
+    if (target.result.os.tag != .windows) {
+        // The upstream Zig package does not define this, so libssh2 fails to put
+        // its socket in non-blocking mode on POSIX. Its blocking API then hangs
+        // in the channel-write drain loop (notably at the first SFTP write).
+        ssh2_lib.root_module.addCMacro("HAVE_O_NONBLOCK", "1");
+    }
     if (use_zlib) {
         ssh2_lib.root_module.linkLibrary(zlib_dep.?.artifact("z"));
     }
@@ -59,7 +65,12 @@ pub fn build(b: *std.Build) void {
     
     // Extract version from build.zig.zon
     const version = v: {
-        const zon_content = b.build_root.handle.readFileAlloc(b.graph.io, "build.zig.zon", b.allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024))) catch break :v "0.0.0";
+        b.dependOnFileContents(b.path("build.zig.zon"));
+        const zon_file = b.root.openFile(b.graph.io, "build.zig.zon", .{}) catch break :v "0.0.0";
+        defer zon_file.close(b.graph.io);
+        var zon_reader_buf: [4096]u8 = undefined;
+        var zon_reader = zon_file.reader(b.graph.io, &zon_reader_buf);
+        const zon_content = zon_reader.interface.allocRemaining(b.allocator, std.Io.Limit.limited(1024 * 1024)) catch break :v "0.0.0";
         if (std.mem.indexOf(u8, zon_content, ".version = \"")) |idx| {
             const start = idx + ".version = \"".len;
             if (std.mem.indexOfScalarPos(u8, zon_content, start, '"')) |end| {
@@ -90,7 +101,7 @@ pub fn build(b: *std.Build) void {
 
     // Cross-building for macOS from non-macOS hosts may not have CoreServices SDK available.
     // In that case, skip framework linking to avoid invalid toolchain errors.
-    if (optimize != .Debug) {
+    if (optimize != .debug) {
         exe.root_module.strip = true;
     }
 
@@ -141,10 +152,6 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
     const stats_exe = b.addExecutable(.{
         .name = "stats",
         .root_module = b.createModule(.{
@@ -174,6 +181,21 @@ pub fn build(b: *std.Build) void {
 
     const stats_step = b.step("stats", "Build the stats executable");
     stats_step.dependOn(&stats_exe.step);
+
+    const test_step = b.step("test", "Run unit tests");
+    for ([_][]const u8{ "src/config_test.zig", "src/glob_test.zig" }) |test_path| {
+        const test_exe = b.addTest(.{
+            .name = std.fs.path.stem(test_path),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(test_path),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        test_exe.root_module.addOptions("config", build_opts);
+        const run_test = b.addRunArtifact(test_exe);
+        test_step.dependOn(&run_test.step);
+    }
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);

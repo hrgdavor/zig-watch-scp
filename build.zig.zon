@@ -25,7 +25,7 @@
     .fingerprint = 0x675e6f1be8cea7ec, // Changing this has security and trust implications.
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
@@ -33,16 +33,16 @@
     // internet connectivity.
     .dependencies = .{
         .zlib = .{
-            .url = "https://github.com/allyourcodebase/zlib/archive/refs/heads/master.tar.gz",
+            .url = "https://github.com/allyourcodebase/zlib/archive/refs/tags/1.3.2.tar.gz",
             .hash = "zlib-1.3.2-ZZQ7lc8NAAAHm9MDfplvwoesXvk4tVm6VCsiI8KnIbT0",
         },
         .mbedtls = .{
             .url = "https://github.com/allyourcodebase/mbedtls/archive/refs/heads/master.tar.gz",
-            .hash = "mbedtls-3.6.4-E4NUR2wWAAAUSvVbho9aaU31-e4D8glu9l1VfxKezBkV",
+            .hash = "mbedtls-3.6.6-E4NUR4cWAACCHFSwZ5urTBPK4A6EZlm3pSUjfg4c3QAw",
         },
         .libssh2 = .{
             .url = "https://github.com/allyourcodebase/libssh2/archive/refs/heads/master.tar.gz",
-            .hash = "libssh2-1.11.1-JgdeR_IVAADECr31WRIbtJ0x0MrnNrmljUx0tb_yzEmD",
+            .hash = "libssh2-1.11.1-JgdeR2MVAACKegIWtQY8TJ_FvjazftW3Fmlb6HyTEgwn",
         },
         .libssh2_upstream = .{
             .url = "https://github.com/libssh2/libssh2/archive/refs/tags/libssh2-1.11.1.tar.gz",
@@ -50,7 +50,7 @@
         },
         .nightwatch = .{
             .url = "https://github.com/neurocyte/nightwatch/archive/refs/heads/master.tar.gz",
-            .hash = "nightwatch-1.0.0-uXzeHzCgAgBNSi0lpwYyPXdiSnZeiExDSiu_XdZO55HI",
+            .hash = "nightwatch-1.0.0-uXzeH1QSAwD990k0ddEUyOFNS1uD3bPqCyEMOr5DStgy",
         },
     },
     .paths = .{

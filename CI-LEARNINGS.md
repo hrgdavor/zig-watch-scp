@@ -84,7 +84,7 @@ ZIG_SYSROOT=--sysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOS
 
 ```yaml
 - name: Build
-  run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe ${{ env.ZIG_SYSROOT }} --summary all
+  run: zig build -Dtarget=${{ matrix.target }} -Doptimize=safe ${{ env.ZIG_SYSROOT }} --summary all
 ```
 
 The env var is empty on non-macOS runners, so this works for all matrix entries with one line.
@@ -362,5 +362,5 @@ jobs:
         run: echo "ZIG_SYSROOT=--sysroot $(xcrun --show-sdk-path)" >> $GITHUB_ENV
 
       - name: Build
-        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe ${{ env.ZIG_SYSROOT }} --summary all
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=safe ${{ env.ZIG_SYSROOT }} --summary all
 ```

@@ -541,7 +541,7 @@ pub fn performVersionFileUpload(
     const version_from = v_from orelse return;
     const version_to = v_to orelse return;
 
-    const template_content = std.Io.Dir.cwd().readFileAlloc(io, version_from, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024))) catch |err| {
+    const template_content = std.Io.Dir.cwd().readFileAlloc(io, version_from, allocator, std.Io.Limit.limited(1024 * 1024)) catch |err| {
         std.debug.print("Warning: Failed to read version template {s}: {s}\n", .{ version_from, @errorName(err) });
         return;
     };

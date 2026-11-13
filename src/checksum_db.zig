@@ -152,7 +152,7 @@ pub fn calculateFileChecksum(
     if (is_text_file) {
         // For text files, we still need to load and normalize
         // Increase limit to 1GB for text files
-        const content = try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024 * 1024)));
+        const content = try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, std.Io.Limit.limited(1024 * 1024 * 1024));
         defer allocator.free(content);
 
         const normalized = try normalizeLineEndings(allocator, content);

@@ -57,7 +57,7 @@ pub const LinuxWatcher = struct {
     }
 
     fn addWatch(self: *LinuxWatcher, path: []const u8) !void {
-        const path_z = try self.allocator.dupeZ(u8, path);
+        const path_z = try self.allocator.dupeSentinel(u8, path, 0);
         defer self.allocator.free(path_z);
 
         const mask = c.IN_CREATE | c.IN_MODIFY | c.IN_DELETE | c.IN_MOVED_FROM | c.IN_MOVED_TO;

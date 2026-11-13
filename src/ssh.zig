@@ -83,10 +83,10 @@ pub const SshSession = struct {
         }
 
         // Null-terminate host and port strings for getaddrinfo
-        const host_z = try allocator.dupeZ(u8, host_str);
+        const host_z = try allocator.dupeSentinel(u8, host_str, 0);
         defer allocator.free(host_z);
         var port_buf: [8]u8 = undefined;
-        const port_s = try std.fmt.bufPrintZ(&port_buf, "{}", .{port});
+        const port_s = try std.fmt.bufPrintSentinel(&port_buf, "{}", .{port}, 0);
 
         // Resolve hostname and create TCP socket via C getaddrinfo
         var hints = std.mem.zeroes(c.addrinfo);
@@ -132,7 +132,7 @@ pub const SshSession = struct {
         }
 
         // Authenticate
-        const username_z = try allocator.dupeZ(u8, username);
+        const username_z = try allocator.dupeSentinel(u8, username, 0);
         defer allocator.free(username_z);
 
         // Attempt agent authentication first
@@ -154,7 +154,7 @@ pub const SshSession = struct {
             const expanded_path = try path_util.expandHomeAndNormalize(allocator, environ, key_path);
             defer allocator.free(expanded_path);
 
-            const key_path_z = try allocator.dupeZ(u8, expanded_path);
+            const key_path_z = try allocator.dupeSentinel(u8, expanded_path, 0);
             defer allocator.free(key_path_z);
             if (builtin.os.tag == .windows) {
                 for (key_path_z) |*char| {
@@ -190,8 +190,8 @@ pub const SshSession = struct {
             const pub_key_path = try std.fmt.allocPrint(allocator, "{s}.pub", .{key_path_z});
             defer allocator.free(pub_key_path);
             if (std.Io.Dir.accessAbsolute(io, pub_key_path, .{})) |_| {
-                pub_key_path_z = try allocator.dupeZ(u8, pub_key_path);
-                pub_key_content = std.Io.Dir.cwd().readFileAlloc(io, pub_key_path, allocator, @as(std.Io.Limit, @enumFromInt(4096))) catch null;
+                pub_key_path_z = try allocator.dupeSentinel(u8, pub_key_path, 0);
+                pub_key_content = std.Io.Dir.cwd().readFileAlloc(io, pub_key_path, allocator, std.Io.Limit.limited(4096)) catch null;
                 if (verbose) std.debug.print("Found and read public key file: {s}\n", .{pub_key_path});
             } else |_| {
                 if (verbose) std.debug.print("No .pub file found at {s}\n", .{pub_key_path});
@@ -199,7 +199,7 @@ pub const SshSession = struct {
             defer if (pub_key_path_z) |p| allocator.free(p);
             defer if (pub_key_content) |c_val| allocator.free(c_val);
 
-            const passphrase_z = if (passphrase.len > 0) try allocator.dupeZ(u8, passphrase) else null;
+            const passphrase_z = if (passphrase.len > 0) try allocator.dupeSentinel(u8, passphrase, 0) else null;
             defer if (passphrase_z) |p| allocator.free(p);
             const passphrase_ptr = if (passphrase_z) |p| p.ptr else null;
 
@@ -242,12 +242,12 @@ pub const SshSession = struct {
 
                 // Try frommemory as fallback
                 if (verbose) std.debug.print("Trying public key authentication (frommemory, pubkey=NULL)...\n", .{});
-                const priv_key_raw = std.Io.Dir.cwd().readFileAlloc(io, key_path_z, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024))) catch |err| {
+                const priv_key_raw = std.Io.Dir.cwd().readFileAlloc(io, key_path_z, allocator, std.Io.Limit.limited(1024 * 1024)) catch |err| {
                     std.debug.print("Error reading private key file: {s}\n", .{@errorName(err)});
                     return error.KeyReadFailed;
                 };
                 defer allocator.free(priv_key_raw);
-                const pub_key_raw = if (pub_key_path_z) |p| std.Io.Dir.cwd().readFileAlloc(io, p, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024))) catch null else null;
+                const pub_key_raw = if (pub_key_path_z) |p| std.Io.Dir.cwd().readFileAlloc(io, p, allocator, std.Io.Limit.limited(1024 * 1024)) catch null else null;
                 defer if (pub_key_raw) |pr| allocator.free(pr);
 
                 auth_result = c.libssh2_userauth_publickey_frommemory(
@@ -303,7 +303,7 @@ pub const SshSession = struct {
         // Fall back to password auth
         if (password.len > 0) {
             if (verbose) std.debug.print("Trying password authentication...\n", .{});
-            const password_z = try allocator.dupeZ(u8, password);
+            const password_z = try allocator.dupeSentinel(u8, password, 0);
             defer allocator.free(password_z);
 
             if (c.libssh2_userauth_password_ex(
@@ -353,7 +353,7 @@ pub const SshSession = struct {
     pub fn downloadFile(self: *SshSession, remote_path: []const u8, local_path: []const u8) !void {
         const sftp = try self.getSftp();
 
-        const remote_path_z = try self.allocator.dupeZ(u8, remote_path);
+        const remote_path_z = try self.allocator.dupeSentinel(u8, remote_path, 0);
         defer self.allocator.free(remote_path_z);
 
         const remote_file = c.libssh2_sftp_open_ex(
@@ -392,7 +392,7 @@ pub const SshSession = struct {
     /// Get remote file information (size and mtime)
     pub fn getFileInfo(self: *SshSession, path: []const u8) !?FileInfo {
         const sftp = try self.getSftp();
-        const path_z = try self.allocator.dupeZ(u8, path);
+        const path_z = try self.allocator.dupeSentinel(u8, path, 0);
         defer self.allocator.free(path_z);
 
         var attrs: c.LIBSSH2_SFTP_ATTRIBUTES = undefined;
@@ -426,7 +426,7 @@ pub const SshSession = struct {
     /// Upload a buffer to remote server
     pub fn uploadBuffer(self: *SshSession, data: []const u8, remote_path: []const u8, simple_log: bool) !void {
         const sftp = try self.getSftp();
-        const remote_path_z = try self.allocator.dupeZ(u8, remote_path);
+        const remote_path_z = try self.allocator.dupeSentinel(u8, remote_path, 0);
         defer self.allocator.free(remote_path_z);
 
         const remote_file = c.libssh2_sftp_open_ex(
@@ -460,7 +460,7 @@ pub const SshSession = struct {
     fn uploadFromReader(self: *SshSession, reader: *std.Io.Reader, size: u64, remote_path: []const u8, simple_log: bool) !void {
         const sftp = try self.getSftp();
 
-        const remote_path_z = try self.allocator.dupeZ(u8, remote_path);
+        const remote_path_z = try self.allocator.dupeSentinel(u8, remote_path, 0);
         defer self.allocator.free(remote_path_z);
 
         const remote_file = c.libssh2_sftp_open_ex(
@@ -543,7 +543,7 @@ pub const SshSession = struct {
             dir_stack.items.len -= 1;
             defer allocator.free(current_dir);
 
-            const current_dir_z = try allocator.dupeZ(u8, current_dir);
+            const current_dir_z = try allocator.dupeSentinel(u8, current_dir, 0);
             defer allocator.free(current_dir_z);
 
             const handle = c.libssh2_sftp_open_ex(
@@ -600,7 +600,7 @@ pub const SshSession = struct {
     /// Remove a remote file
     pub fn removeRemoteFile(self: *SshSession, remote_path: []const u8) !void {
         const sftp = try self.getSftp();
-        const remote_path_z = try self.allocator.dupeZ(u8, remote_path);
+        const remote_path_z = try self.allocator.dupeSentinel(u8, remote_path, 0);
         defer self.allocator.free(remote_path_z);
 
         if (c.libssh2_sftp_unlink_ex(sftp, remote_path_z.ptr, @intCast(remote_path.len)) != 0) {
@@ -613,7 +613,7 @@ pub const SshSession = struct {
     /// Remove a remote directory
     pub fn removeRemoteDir(self: *SshSession, remote_path: []const u8) !void {
         const sftp = try self.getSftp();
-        const remote_path_z = try self.allocator.dupeZ(u8, remote_path);
+        const remote_path_z = try self.allocator.dupeSentinel(u8, remote_path, 0);
         defer self.allocator.free(remote_path_z);
 
         if (c.libssh2_sftp_rmdir_ex(sftp, remote_path_z.ptr, @intCast(remote_path.len)) != 0) {
@@ -649,7 +649,7 @@ pub const SshSession = struct {
             try current_path.appendSlice(self.allocator, part);
 
             // Create a temporary null-terminated string for this path component
-            const path_z = try self.allocator.dupeZ(u8, current_path.items);
+            const path_z = try self.allocator.dupeSentinel(u8, current_path.items, 0);
             defer self.allocator.free(path_z);
 
             // Some SFTP servers treat a mode of 0 as literal 000 permissions when creating
@@ -669,7 +669,7 @@ pub const SshSession = struct {
         const channel = c.libssh2_channel_open_ex(self.session, "session", @intCast("session".len), c.LIBSSH2_CHANNEL_WINDOW_DEFAULT, c.LIBSSH2_CHANNEL_PACKET_DEFAULT, null, 0) orelse return error.ChannelOpenFailed;
         defer _ = c.libssh2_channel_free(channel);
 
-        const command_z = try self.allocator.dupeZ(u8, command);
+        const command_z = try self.allocator.dupeSentinel(u8, command, 0);
         defer self.allocator.free(command_z);
 
         if (c.libssh2_channel_process_startup(channel, "exec", @intCast("exec".len), command_z.ptr, @intCast(command.len)) != 0) {
@@ -702,7 +702,7 @@ fn tryAgentAuth(session: *c.LIBSSH2_SESSION, username: []const u8) bool {
     if (c.libssh2_agent_connect(agent) != 0) return false;
     if (c.libssh2_agent_list_identities(agent) != 0) return false;
 
-    const username_z = std.heap.c_allocator.dupeZ(u8, username) catch return false;
+    const username_z = std.heap.c_allocator.dupeSentinel(u8, username, 0) catch return false;
     defer std.heap.c_allocator.free(username_z);
 
     var prev_identity: ?*c.libssh2_agent_publickey = null;

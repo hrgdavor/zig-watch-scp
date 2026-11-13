@@ -384,7 +384,7 @@ pub const Config = struct {
     pub fn resolveSshConfigFile(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, config: *Config, path: []const u8) !void {
         if (config.host.len == 0) return;
 
-        const content = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024))) catch |err| {
+        const content = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, std.Io.Limit.limited(1024 * 1024)) catch |err| {
             if (err == error.FileNotFound) return;
             return err;
         };
@@ -549,7 +549,7 @@ pub const Config = struct {
             var chunk_buf: [4096]u8 = undefined;
             var reader = stdin_file.reader(io, &chunk_buf);
             break :blk try reader.interface.allocRemaining(allocator, .unlimited);
-        } else try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, @as(std.Io.Limit, @enumFromInt(1024 * 1024)));
+        } else try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, std.Io.Limit.limited(1024 * 1024));
         defer allocator.free(content);
 
         // --- Pass 1: collect ENV.VARNAME= defaults from global scope ---
