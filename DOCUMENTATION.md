@@ -357,7 +357,7 @@ no_db=true
 
 ### Single File Sync Alias (`[file]`)
 
-A shorthand for syncing one file using `mtime_size` + `no_db=true`:
+A shorthand for syncing one file. The first sync uploads it defensively. In watch mode the last checksum is kept in memory, so touching the file (changing only its timestamp) without changing its contents does not upload it again.
 
 ```ini
 [file]

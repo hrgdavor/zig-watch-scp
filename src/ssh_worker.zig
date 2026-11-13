@@ -101,17 +101,21 @@ pub fn performInitialSync(
         }
     }
 
-    if (!folder.no_db and !config.dry_run) {
-        // Prune database: re-populate with only current local files
+    if (!config.dry_run) {
+        // Re-populate the database with only current local files.
+        // Keep this in memory even for `no_db` folders so watch mode can
+        // compare content hashes without reading the remote filesystem.
         remote_db.clear();
         for (scanner.files.items) |entry| {
             try remote_db.put(entry.path, entry.checksum, entry.mtime, entry.size);
         }
 
-        // Save updated database
-        try ssh_mutex.lock(io);
-        defer ssh_mutex.unlock(io);
-        try saveDatabase(allocator, io, config, folder, remote_db, ssh, remote_db_path);
+        if (!folder.no_db) {
+            // Save updated database
+            try ssh_mutex.lock(io);
+            defer ssh_mutex.unlock(io);
+            try saveDatabase(allocator, io, config, folder, remote_db, ssh, remote_db_path);
+        }
     }
 
     // Initial Cleanup if requested
@@ -411,7 +415,14 @@ pub fn processReadySync(
     const is_text = checksum_db.isTextFile(rel_path, config.text_extensions);
     var checksum: u64 = 0;
 
-    if (fs.folder.no_db) {
+    if (fs.folder.single_file) {
+        // `[file]` tasks keep the last synced hash in memory so a touched but
+        // unchanged file is skipped. The first sync still uploads defensively.
+        checksum = try checksum_db.calculateFileChecksum(allocator, io, local_path, is_text);
+        if (fs.remote_db.get(rel_path)) |old_entry| {
+            is_changed = (old_entry.hash != checksum);
+        }
+    } else if (fs.folder.no_db) {
         if (try ssh.getFileInfo(rel_path)) |remote_info| {
             if (fs.folder.check == .mtime_size) {
                 // Upload if local is newer, OR binary file changed size
@@ -461,8 +472,12 @@ pub fn processReadySync(
     } else {
         try syncFile(allocator, config, fs.folder, ssh, rel_path);
 
+        // Always remember the hash for this process, even when no on-disk
+        // database is used (`no_db` / `[file]`). This is what lets watch mode
+        // skip a touched-but-unchanged file.
+        try fs.remote_db.put(rel_path, checksum, mtime, stat.size);
+
         if (!fs.folder.no_db) {
-            try fs.remote_db.put(rel_path, checksum, mtime, stat.size);
             try saveDatabase(allocator, io, config, fs.folder, &fs.remote_db, ssh, fs.remote_db_path);
         }
     }

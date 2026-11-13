@@ -60,7 +60,7 @@ pub const LinuxWatcher = struct {
         const path_z = try self.allocator.dupeSentinel(u8, path, 0);
         defer self.allocator.free(path_z);
 
-        const mask = c.IN_CREATE | c.IN_MODIFY | c.IN_DELETE | c.IN_MOVED_FROM | c.IN_MOVED_TO;
+        const mask = c.IN_CREATE | c.IN_MODIFY | c.IN_ATTRIB | c.IN_DELETE | c.IN_MOVED_FROM | c.IN_MOVED_TO;
         const wd = c.inotify_add_watch(self.inotify_fd, path_z.ptr, mask);
         if (wd < 0) {
             return error.InotifyAddWatchFailed;
@@ -108,7 +108,7 @@ pub const LinuxWatcher = struct {
 
             const kind: watcher_common.ChangeKind = if (event.mask & c.IN_CREATE != 0 or event.mask & c.IN_MOVED_TO != 0)
                 .created
-            else if (event.mask & c.IN_MODIFY != 0)
+            else if (event.mask & c.IN_MODIFY != 0 or event.mask & c.IN_ATTRIB != 0)
                 .modified
             else if (event.mask & c.IN_DELETE != 0 or event.mask & c.IN_MOVED_FROM != 0)
                 .deleted

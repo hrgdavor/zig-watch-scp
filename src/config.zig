@@ -20,6 +20,8 @@ pub const Folder = struct {
     version_name: ?[]const u8,
     check: CheckMode = .hash,
     no_db: bool = false,
+    /// True for `[file]` sections: one local file mapped to a remote directory.
+    single_file: bool = false,
 };
 
 pub const LocalSource = struct {
@@ -611,6 +613,7 @@ pub const Config = struct {
         var cur_version_name: ?[]const u8 = null;
         var cur_check: CheckMode = .hash;
         var cur_no_db: bool = false;
+        var cur_single_file: bool = false;
 
         var cur_dest_dir: ?[]const u8 = null;
         var cur_sources = std.ArrayList(LocalSource).empty;
@@ -632,6 +635,7 @@ pub const Config = struct {
                 v_name: *?[]const u8,
                 check: CheckMode,
                 no_db: bool,
+                single_file: bool,
             ) !void {
                 if (l_dir.* == null and r_dir.* == null and inc.items.len == 0 and exc.items.len == 0 and t_to.* == null and v_to.* == null) return;
                 try f_list.append(alloc, .{
@@ -648,6 +652,7 @@ pub const Config = struct {
                     .version_name = v_name.*,
                     .check = check,
                     .no_db = no_db,
+                    .single_file = single_file,
                 });
                 l_dir.* = null;
                 r_dir.* = null;
@@ -700,10 +705,11 @@ pub const Config = struct {
             if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
             if (std.mem.eql(u8, trimmed, "[folder]")) {
-                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db);
+                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db, cur_single_file);
                 if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
                 if (section == .local_folder) try pushLocalWorker(allocator, &local_copy_workers, &cur_dest_dir, &cur_sources);
                 section = .folder;
+                cur_single_file = false;
                 cur_local_db = false;
                 cur_check = .hash;
                 cur_no_db = false;
@@ -711,10 +717,11 @@ pub const Config = struct {
             }
 
             if (std.mem.eql(u8, trimmed, "[file]")) {
-                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db);
+                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db, cur_single_file);
                 if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
                 if (section == .local_folder) try pushLocalWorker(allocator, &local_copy_workers, &cur_dest_dir, &cur_sources);
                 section = .file;
+                cur_single_file = true;
                 cur_local_db = false;
                 cur_check = .mtime_size;
                 cur_no_db = true;
@@ -722,17 +729,19 @@ pub const Config = struct {
             }
 
             if (std.mem.eql(u8, trimmed, "[local-folder]")) {
-                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db);
+                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db, cur_single_file);
                 if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
                 if (section == .local_folder) try pushLocalWorker(allocator, &local_copy_workers, &cur_dest_dir, &cur_sources);
                 section = .local_folder;
+                cur_single_file = false;
                 continue;
             }
 
             if (std.mem.eql(u8, trimmed, "[source]")) {
-                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db);
+                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db, cur_single_file);
                 if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
                 section = .source;
+                cur_single_file = false;
                 continue;
             }
 
@@ -854,7 +863,7 @@ pub const Config = struct {
             }
         }
 
-        if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db);
+        if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db, cur_single_file);
         if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
         if (section == .local_folder or section == .source) try pushLocalWorker(allocator, &local_copy_workers, &cur_dest_dir, &cur_sources);
 

@@ -16,6 +16,10 @@ test "config: parse text_extensions, include, and exclude" {
         \\text_extensions = .zig, .c, .h
         \\include = src/**/*.zig, src/**/*.h
         \\exclude = **/node_modules/**, **/*.tmp
+        \\
+        \\[file]
+        \\local_file = ./single.txt
+        \\remote_dir = /remote-file
     ;
 
     const tmp_file_path = "test_sync.conf";
@@ -102,9 +106,17 @@ test "config: parse text_extensions, include, and exclude" {
     try std.testing.expectEqualStrings(".zig", cfg.text_extensions[0]);
 
     // Verify folders
-    try std.testing.expectEqual(@as(usize, 1), cfg.folders.len);
+    try std.testing.expectEqual(@as(usize, 2), cfg.folders.len);
     try std.testing.expectEqualStrings("./local", cfg.folders[0].local_dir);
     try std.testing.expectEqualStrings("/remote", cfg.folders[0].remote_dir);
+
+    // Verify [file] shorthand
+    try std.testing.expect(cfg.folders[1].single_file);
+    try std.testing.expect(cfg.folders[1].no_db);
+    try std.testing.expectEqual(config.CheckMode.mtime_size, cfg.folders[1].check);
+    try std.testing.expectEqual(@as(usize, 1), cfg.folders[1].include_patterns.len);
+    try std.testing.expectEqualStrings("single.txt", cfg.folders[1].include_patterns[0]);
+    try std.testing.expectEqualStrings("/remote-file", cfg.folders[1].remote_dir);
 }
 
 test "ssh_config: resolution" {
