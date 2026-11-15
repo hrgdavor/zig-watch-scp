@@ -8,13 +8,13 @@ The goal is a reference so future CI changes don't rediscover the same pitfalls.
 
 ## Summary of Working Setup
 
-| Target              | Runner          | Notes                                    |
-| ------------------- | --------------- | ---------------------------------------- |
-| `x86_64-linux`      | `ubuntu-latest` | straightforward                          |
-| `aarch64-linux`     | `ubuntu-latest` | cross-compile, no special steps needed   |
-| `x86_64-windows`    | `windows-latest`| straightforward                          |
-| `x86_64-macos`      | `macos-latest`  | cross-arch (aarch64 runner → x86_64 bin) |
-| `aarch64-macos`     | `macos-latest`  | native                                   |
+| Target              | Runner           | Notes                                    |
+| ------------------- | ---------------- | ---------------------------------------- |
+| `x86_64-linux`      | `ubuntu-latest`  | straightforward                          |
+| `aarch64-linux`     | `ubuntu-latest`  | cross-compile, no special steps needed   |
+| `x86_64-windows`    | `windows-latest` | straightforward                          |
+| `x86_64-macos`      | `macos-latest`   | cross-arch (aarch64 runner → x86_64 bin) |
+| `aarch64-macos`     | `macos-latest`   | native                                   |
 
 Both macOS builds produce **FSEvents-backed** watchers (not the polling fallback), because the
 runner OS is macOS in both cases even when the CPU arch differs.
@@ -72,22 +72,25 @@ explicitly.
 ```yaml
 - name: Set macOS SDK root
   if: runner.os == 'macOS'
-  run: echo "ZIG_SYSROOT=--sysroot $(xcrun --show-sdk-path)" >> $GITHUB_ENV
+  run: |
+    echo "ZIG_SYSROOT=--sysroot $(xcrun --show-sdk-path)" >> $GITHUB_ENV
+    echo "ZIG_SDK=$(xcrun --show-sdk-path)" >> $GITHUB_ENV
 ```
 
 This writes something like:
 ```
 ZIG_SYSROOT=--sysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.2.sdk
+ZIG_SDK=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.2.sdk
 ```
 
 **Part B: Pass it to `zig build`:**
 
 ```yaml
 - name: Build
-  run: zig build -Dtarget=${{ matrix.target }} -Doptimize=safe ${{ env.ZIG_SYSROOT }} --summary all
+  run: zig build -Dtarget=${{ matrix.target }} -Doptimize=safe ${{ env.ZIG_SYSROOT }} ${{ runner.os == 'macOS' && format('-Dmacos-sdk={0}', env.ZIG_SDK) || '' }} --summary all
 ```
 
-The env var is empty on non-macOS runners, so this works for all matrix entries with one line.
+The env vars are empty on non-macOS runners, so this works for all matrix entries with one line.
 
 ---
 
@@ -100,18 +103,20 @@ error: unable to find framework 'CoreServices'. searched paths: none
 (same error, even after adding `--sysroot`)
 
 **Cause:**  
-In Zig 0.15, passing `--sysroot` to `zig build` populates `b.sysroot` in `build.zig`, but
-does **not** automatically add `-F` or `-I` flags pointing inside that sysroot. You must
-register the paths manually.
+Passing `--sysroot` to `zig build` does **not** automatically add `-F` or `-I` flags pointing
+inside that sysroot. You must register the paths manually. In Zig 0.17 the build script can no
+longer read `b.sysroot`; the SDK path is passed explicitly with `-Dmacos-sdk`.
 
 **Fix — in `build.zig`:**
 
 ```zig
+const macos_sdk = b.option([]const u8, "macos-sdk", "macOS SDK root");
+
 if (use_coreservices) {
-    exe.linkFramework("CoreServices");
-    if (b.sysroot) |sysroot| {
-        exe.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
-        exe.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
+    exe.root_module.linkFramework("CoreServices", .{});
+    if (macos_sdk) |sysroot| {
+        exe.root_module.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
+        exe.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
     }
 }
 ```
@@ -321,14 +326,14 @@ and not maintained to the same standard.
 
 ## Zig 0.15 API Changes Cheatsheet
 
-| Old (Zig 0.14)           | New (Zig 0.15)              | Where it bites                      |
-| ------------------------ | --------------------------- | ----------------------------------- |
-| `callconv(.C)`           | `callconv(.c)`              | C callback declarations             |
-| `callconv(.Stdcall)`     | `callconv(.stdcall)`        | Windows API callbacks               |
-| `@ptrCast(&const_val)`   | `@ptrCast(@constCast(&val))`| Any const pointer passed to C APIs  |
-| `std.fs.cwd().writeFile(path, data)` | `std.fs.cwd().writeFile(.{ .sub_path = path, .data = data })` | File writes |
-| `std.mem.split`          | `std.mem.splitScalar` / `splitSequence` | String splitting            |
-| `std.time.sleep`         | `std.Thread.sleep`          | Cross-platform sleep                |
+| Old (Zig 0.14)                       | New (Zig 0.15)                                                | Where it bites                      |
+| ------------------------------------ | ------------------------------------------------------------- | ----------------------------------- |
+| `callconv(.C)`                       | `callconv(.c)`                                                | C callback declarations             |
+| `callconv(.Stdcall)`                 | `callconv(.stdcall)`                                          | Windows API callbacks               |
+| `@ptrCast(&const_val)`               | `@ptrCast(@constCast(&val))`                                  | Any const pointer passed to C APIs  |
+| `std.fs.cwd().writeFile(path, data)` | `std.fs.cwd().writeFile(.{ .sub_path = path, .data = data })` | File writes                         |
+| `std.mem.split`                      | `std.mem.splitScalar` / `splitSequence`                       | String splitting                    |
+| `std.time.sleep`                     | `std.Thread.sleep`                                            | Cross-platform sleep                |
 
 ---
 
