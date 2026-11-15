@@ -77,3 +77,47 @@ These removals/renames are relevant to this codebase:
 - `@enumFromInt` / `@intFromEnum` are deprecated: prefer `@fromBackingInt(@intCast(x))` / `@backingInt(x)`.
 - `@cImport` was removed from the language. This project already translates headers through `b.addTranslateC`; keep using that path.
 - Build scripts run in a separate configure process: `b.build_root` and `b.args` no longer exist. Depend on files explicitly with `b.dependOnFileContents(...)`.
+- `b.sysroot` was removed. macOS builds pass the SDK path explicitly with `-Dmacos-sdk`; see section 6.
+
+## 6. macOS SDK and CoreServices Framework Paths
+
+macOS builds link `CoreServices` for FSEvents. CI passes both the Zig sysroot and the SDK path:
+
+```yaml
+- name: Set macOS SDK root
+  if: runner.os == 'macOS'
+  run: |
+    echo "ZIG_SYSROOT=--sysroot $(xcrun --show-sdk-path)" >> $GITHUB_ENV
+    echo "ZIG_SDK=$(xcrun --show-sdk-path)" >> $GITHUB_ENV
+
+- name: Build
+  run: zig build -Dtarget=${{ matrix.target }} -Doptimize=safe ${{ env.ZIG_SYSROOT }} ${{ runner.os == 'macOS' && format('-Dmacos-sdk={0}', env.ZIG_SDK) || '' }} --summary all
+```
+
+`build.zig` must declare the SDK option and register the paths itself:
+
+```zig
+const macos_sdk = b.option([]const u8, "macos-sdk", "macOS SDK root for CoreServices framework/header paths");
+
+if (use_coreservices) {
+    exe.root_module.linkFramework("CoreServices", .{});
+    if (macos_sdk) |sysroot| {
+        // Zig re-roots absolute -F paths under --sysroot, so use the
+        // target-root path here; only -isystem needs the SDK prefix.
+        exe.root_module.addFrameworkPath(.{ .cwd_relative = "/System/Library/Frameworks" });
+        exe.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
+    }
+}
+```
+
+Apply the same block to the `stats` executable and `addTranslateC` step.
+
+Critical rule:
+
+- Framework paths (`-F`, `addFrameworkPath`) use the **target-root** path: `/System/Library/Frameworks`.
+  `--sysroot <sdk>` rewrites it to `<sdk>/System/Library/Frameworks`.
+  Passing `<sdk>/System/Library/Frameworks` produces the broken `<sdk>/<sdk>/System/Library/Frameworks`.
+- Include paths (`-isystem`, `addSystemIncludePath`) are **not** re-rooted. They must include the SDK prefix: `<sdk>/usr/include`.
+
+Do not reintroduce `b.sysroot`; it does not exist in Zig 0.17. If CI reports
+`unable to find system framework "CoreServices"` with a doubled SDK path, check this rule first.
