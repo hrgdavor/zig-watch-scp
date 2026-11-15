@@ -115,7 +115,9 @@ const macos_sdk = b.option([]const u8, "macos-sdk", "macOS SDK root");
 if (use_coreservices) {
     exe.root_module.linkFramework("CoreServices", .{});
     if (macos_sdk) |sysroot| {
-        exe.root_module.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
+        // Zig rewrites absolute -F paths under --sysroot, so use the
+        // target-root path here; only -isystem needs the SDK prefix.
+        exe.root_module.addFrameworkPath(.{ .cwd_relative = "/System/Library/Frameworks" });
         exe.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
     }
 }

@@ -86,7 +86,9 @@ pub fn build(b: *std.Build) void {
     if (use_coreservices) {
         exe.root_module.linkFramework("CoreServices", .{});
         if (macos_sdk) |sysroot| {
-            exe.root_module.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
+            // Zig prefixes absolute framework paths with --sysroot, so pass the
+            // target-root path here; the SDK prefix is only needed for -isystem.
+            exe.root_module.addFrameworkPath(.{ .cwd_relative = "/System/Library/Frameworks" });
             exe.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
         }
     }
@@ -126,9 +128,8 @@ pub fn build(b: *std.Build) void {
     c_translate.addIncludePath(b.path("src"));
     if (use_coreservices) {
         if (macos_sdk) |sysroot| {
-            const frameworks_path = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" });
-            c_translate.addFrameworkPath(.{ .cwd_relative = frameworks_path });
-            c_translate.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ frameworks_path, "CoreServices.framework/Frameworks" }) });
+            c_translate.addFrameworkPath(.{ .cwd_relative = "/System/Library/Frameworks" });
+            c_translate.addFrameworkPath(.{ .cwd_relative = "/System/Library/Frameworks/CoreServices.framework/Frameworks" });
             c_translate.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
         }
     }
@@ -161,7 +162,7 @@ pub fn build(b: *std.Build) void {
     if (use_coreservices) {
         stats_exe.root_module.linkFramework("CoreServices", .{});
         if (macos_sdk) |sysroot| {
-            stats_exe.root_module.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
+            stats_exe.root_module.addFrameworkPath(.{ .cwd_relative = "/System/Library/Frameworks" });
             stats_exe.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
         }
     }
