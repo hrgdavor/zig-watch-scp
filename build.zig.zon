@@ -34,6 +34,12 @@
     .dependencies = .{
         // Keep dependency URLs immutable (tags or commit SHAs). Branch URLs
         // such as `refs/heads/master` change over time and invalidate `.hash`.
+        // fs-meta is the primary watcher dependency. It pins nightwatch, which
+        // this project imports transitively for its own watcher.
+        .fs_meta = .{
+            .url = "git+https://github.com/hrgdavor/fs-meta#bd8a9fd0e6faeb8b4a4f5a0304871d6a35708c33",
+            .hash = "watcher-0.3.8-Zsl8OLzwKwDVIn93LgmIlE5KQ6BjWcs7Y4IlCHUOE5ZO",
+        },
         .mbedtls = .{
             .url = "https://github.com/allyourcodebase/mbedtls/archive/55f2af148634945e9508a3a50de2ccfe65eb971f.tar.gz",
             .hash = "mbedtls-3.6.6-E4NUR4cWAACCHFSwZ5urTBPK4A6EZlm3pSUjfg4c3QAw",
@@ -45,10 +51,6 @@
         .libssh2_upstream = .{
             .url = "https://github.com/libssh2/libssh2/archive/refs/tags/libssh2-1.11.1.tar.gz",
             .hash = "N-V-__8AAATRLQBu_rNy4X2UK6RtcdYK_yAzkV6OcCqgo5aK",
-        },
-        .nightwatch = .{
-            .url = "https://github.com/neurocyte/nightwatch/archive/421667358e907be504918f339f3d09a42fc1c90a.tar.gz",
-            .hash = "nightwatch-1.0.0-uXzeH1QSAwD990k0ddEUyOFNS1uD3bPqCyEMOr5DStgy",
         },
     },
     .paths = .{

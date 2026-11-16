@@ -6,6 +6,8 @@ const path_util = @import("path_util.zig");
 
 pub const CheckMode = enum { hash, mtime_size };
 
+pub const WatchBackend = enum { nightwatch, fsmeta };
+
 pub const Folder = struct {
     scpdb: []const u8,
     local_db: bool,
@@ -59,6 +61,11 @@ pub const Config = struct {
     version_from: ?[]const u8,
     version_to: ?[]const u8,
     version_name: ?[]const u8,
+
+    /// Watcher implementation. `nightwatch` is implemented; `fsmeta` is the
+    /// reserved Unix-socket backend for the next integration step.
+    watch_backend: WatchBackend = .nightwatch,
+    fsmeta_socket: ?[]const u8 = null,
 
     // Standalone create mode
     create_folder: ?[]const u8,
@@ -792,6 +799,18 @@ pub const Config = struct {
                     }
                 } else if (std.mem.eql(u8, key, "compress")) {
                     config.compress = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "yes");
+                } else if (std.mem.eql(u8, key, "watch_backend")) {
+                    if (section != .global) continue;
+                    if (std.mem.eql(u8, value, "nightwatch")) {
+                        config.watch_backend = .nightwatch;
+                    } else if (std.mem.eql(u8, value, "fsmeta")) {
+                        config.watch_backend = .fsmeta;
+                    } else {
+                        return error.InvalidWatchBackend;
+                    }
+                } else if (std.mem.eql(u8, key, "fsmeta_socket")) {
+                    if (section != .global) continue;
+                    config.fsmeta_socket = try path_util.expandHomeAndNormalize(allocator, environ, value);
                 } else if (std.mem.eql(u8, key, "cleanup")) {
                     config.cleanup = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "yes");
                 } else if (std.mem.eql(u8, key, "dry_run")) {

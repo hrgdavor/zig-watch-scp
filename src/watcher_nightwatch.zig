@@ -12,11 +12,14 @@ pub const NightwatchWatcher = struct {
     mutex: std.Io.Mutex,
     event_count: std.atomic.Value(u32),
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !NightwatchWatcher {
+    pub fn create(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !*NightwatchWatcher {
         const resolved_path = try std.fs.path.resolve(allocator, &.{path});
         defer allocator.free(resolved_path);
 
-        var self = NightwatchWatcher{
+        const self = try allocator.create(NightwatchWatcher);
+        errdefer allocator.destroy(self);
+
+        self.* = .{
             .allocator = allocator,
             .io = io,
             .base_path = try allocator.dupe(u8, resolved_path),
@@ -26,22 +29,16 @@ pub const NightwatchWatcher = struct {
             .mutex = std.Io.Mutex.init,
             .event_count = .init(0),
         };
+        errdefer allocator.free(self.base_path);
+        errdefer self.event_queue.deinit(allocator);
 
-        var cleanup = true;
-        defer blk: {
-            if (!cleanup) break :blk;
-            self.allocator.free(self.base_path);
-            self.event_queue.deinit(self.allocator);
-        }
-
+        // The watcher keeps this pointer for its lifetime, so the handler must
+        // live at a stable address. That is why NightwatchWatcher is heap
+        // allocated and returned as a pointer.
         self.watcher = try nightwatch.Default.init(io, allocator, &self.handler.handler);
-        defer blk2: {
-            if (!cleanup) break :blk2;
-            self.watcher.deinit();
-        }
+        errdefer self.watcher.deinit();
 
-        try self.watcher.watch(resolved_path);
-        cleanup = false;
+        try self.watcher.watch(self.base_path);
         return self;
     }
 
@@ -52,6 +49,7 @@ pub const NightwatchWatcher = struct {
         }
         self.event_queue.deinit(self.allocator);
         self.allocator.free(self.base_path);
+        self.allocator.destroy(self);
     }
 
     pub fn nextEvent(self: *NightwatchWatcher) !?common.FileChange {

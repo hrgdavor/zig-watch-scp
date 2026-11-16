@@ -77,47 +77,25 @@ These removals/renames are relevant to this codebase:
 - `@enumFromInt` / `@intFromEnum` are deprecated: prefer `@fromBackingInt(@intCast(x))` / `@backingInt(x)`.
 - `@cImport` was removed from the language. This project already translates headers through `b.addTranslateC`; keep using that path.
 - Build scripts run in a separate configure process: `b.build_root` and `b.args` no longer exist. Depend on files explicitly with `b.dependOnFileContents(...)`.
-- `b.sysroot` was removed. macOS builds pass the SDK path explicitly with `-Dmacos-sdk`; see section 6.
+- `b.sysroot` was removed. Pass `--sysroot` to `zig build`; the build script cannot read it directly.
 
-## 6. macOS SDK and CoreServices Framework Paths
+## 6. Watcher Architecture
 
-macOS builds link `CoreServices` for FSEvents. CI passes both the Zig sysroot and the SDK path:
-
-```yaml
-- name: Set macOS SDK root
-  if: runner.os == 'macOS'
-  run: |
-    echo "ZIG_SYSROOT=--sysroot $(xcrun --show-sdk-path)" >> $GITHUB_ENV
-    echo "ZIG_SDK=$(xcrun --show-sdk-path)" >> $GITHUB_ENV
-
-- name: Build
-  run: zig build -Dtarget=${{ matrix.target }} -Doptimize=safe ${{ env.ZIG_SYSROOT }} ${{ runner.os == 'macOS' && format('-Dmacos-sdk={0}', env.ZIG_SDK) || '' }} --summary all
-```
-
-`build.zig` must declare the SDK option and register the paths itself:
-
-```zig
-const macos_sdk = b.option([]const u8, "macos-sdk", "macOS SDK root for CoreServices framework/header paths");
-
-if (use_coreservices) {
-    exe.root_module.linkFramework("CoreServices", .{});
-    if (macos_sdk) |sysroot| {
-        // Zig re-roots absolute -F paths under --sysroot, so use the
-        // target-root path here; only -isystem needs the SDK prefix.
-        exe.root_module.addFrameworkPath(.{ .cwd_relative = "/System/Library/Frameworks" });
-        exe.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
-    }
-}
-```
-
-Apply the same block to the `stats` executable and `addTranslateC` step.
-
-Critical rule:
-
-- Framework paths (`-F`, `addFrameworkPath`) use the **target-root** path: `/System/Library/Frameworks`.
-  `--sysroot <sdk>` rewrites it to `<sdk>/System/Library/Frameworks`.
-  Passing `<sdk>/System/Library/Frameworks` produces the broken `<sdk>/<sdk>/System/Library/Frameworks`.
-- Include paths (`-isystem`, `addSystemIncludePath`) are **not** re-rooted. They must include the SDK prefix: `<sdk>/usr/include`.
-
-Do not reintroduce `b.sysroot`; it does not exist in Zig 0.17. If CI reports
-`unable to find system framework "CoreServices"` with a doubled SDK path, check this rule first.
+- `fs-meta` is the primary dependency in `build.zig.zon`. It pins `nightwatch`;
+  `build.zig` reaches that pinned dependency through
+  `fs_meta_dep.builder.dependency("nightwatch", ...)`. Do not add a separate
+  top-level `nightwatch` dependency.
+- `src/watcher.zig` always uses the nightwatch-based `NightwatchWatcher`.
+  The old hand-written inotify / ReadDirectoryChangesW / FSEvents files were
+  removed; keep one event pipeline.
+- The `Watcher` is a runtime union so an fs-meta Unix-socket backend can be
+  added later. `watch_backend=nightwatch` is the implemented default;
+  `watch_backend=fsmeta` is reserved and currently exits at startup with
+  `fs-meta Unix-socket watcher backend is not implemented yet`. Do not claim the
+  fs-meta socket path works until that backend is implemented.
+- Nightwatch retains pointers to the handler for the watcher lifetime.
+  `NightwatchWatcher` must be heap-allocated (`create`) and passed by pointer;
+  never return it by value or the callbacks will point at a dead stack frame.
+- The fs-meta socket path is for the next step: fs-meta watches non-gitignored
+  project files, while zig-watch-scp watches ignored build outputs. The
+  nightwatch path remains the integral default.

@@ -1,11 +1,21 @@
 // SPDX-License-Identifier: LicenseRef-GPL-3.0-with-Commons-Clause
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
-const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.option(std.lang.Optimize, "optimize", "Optimization mode") orelse .safe;
+
+    // fs-meta is the primary dependency. Its pinned nightwatch is used
+    // transitively for this project's watcher implementation.
+    const fs_meta_dep = b.dependency("fs_meta", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const nightwatch_dep = fs_meta_dep.builder.dependency("nightwatch", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const use_zlib = target.result.os.tag != .windows;
 
@@ -51,9 +61,6 @@ pub fn build(b: *std.Build) void {
     }
 
     const build_opts = b.addOptions();
-    const use_nightwatch = b.option(bool, "use_nightwatch", "Enable Nightwatch backend") orelse false;
-    const macos_sdk = b.option([]const u8, "macos-sdk", "macOS SDK root for CoreServices framework/header paths");
-    const use_coreservices = target.result.os.tag == .macos and builtin.os.tag == .macos;
     
     // Extract version from build.zig.zon
     const version = v: {
@@ -72,29 +79,11 @@ pub fn build(b: *std.Build) void {
         break :v "0.0.0";
     };
 
-    build_opts.addOption(bool, "use_nightwatch", use_nightwatch);
-    build_opts.addOption(bool, "use_coreservices", use_coreservices);
     build_opts.addOption([]const u8, "version", version);
     exe.root_module.addOptions("config", build_opts);
 
-    const nightwatch_dep = b.dependency("nightwatch", .{
-        .target = target,
-        .optimize = optimize,
-    });
     exe.root_module.addImport("nightwatch", nightwatch_dep.module("nightwatch"));
 
-    if (use_coreservices) {
-        exe.root_module.linkFramework("CoreServices", .{});
-        if (macos_sdk) |sysroot| {
-            // Zig prefixes absolute framework paths with --sysroot, so pass the
-            // target-root path here; the SDK prefix is only needed for -isystem.
-            exe.root_module.addFrameworkPath(.{ .cwd_relative = "/System/Library/Frameworks" });
-            exe.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
-        }
-    }
-
-    // Cross-building for macOS from non-macOS hosts may not have CoreServices SDK available.
-    // In that case, skip framework linking to avoid invalid toolchain errors.
     if (optimize != .debug) {
         exe.root_module.strip = true;
     }
@@ -112,13 +101,6 @@ pub fn build(b: *std.Build) void {
             \\#include <libssh2.h>
             \\#include <libssh2_sftp.h>
             \\#include "socket_compat.h"
-            \\#ifdef __linux__
-            \\#include <sys/inotify.h>
-            \\#include <unistd.h>
-            \\#include <limits.h>
-            \\#endif
-            \\// macOS headers are avoided here to bypass translate-c issues with Mach types.
-            \\// CoreFoundation and FSEvents are handled via extern in watcher_macos.zig.
         ),
         .target = target,
         .optimize = optimize,
@@ -126,13 +108,6 @@ pub fn build(b: *std.Build) void {
     const libssh2_upstream = b.dependency("libssh2_upstream", .{});
     c_translate.addIncludePath(libssh2_upstream.path("include"));
     c_translate.addIncludePath(b.path("src"));
-    if (use_coreservices) {
-        if (macos_sdk) |sysroot| {
-            c_translate.addFrameworkPath(.{ .cwd_relative = "/System/Library/Frameworks" });
-            c_translate.addFrameworkPath(.{ .cwd_relative = "/System/Library/Frameworks/CoreServices.framework/Frameworks" });
-            c_translate.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
-        }
-    }
 
     const c_module = c_translate.addModule("c");
     exe.root_module.addImport("c", c_module);
@@ -158,14 +133,6 @@ pub fn build(b: *std.Build) void {
     stats_exe.root_module.addImport("c", c_module);
     stats_exe.root_module.addOptions("config", build_opts);
     stats_exe.root_module.addImport("nightwatch", nightwatch_dep.module("nightwatch"));
-
-    if (use_coreservices) {
-        stats_exe.root_module.linkFramework("CoreServices", .{});
-        if (macos_sdk) |sysroot| {
-            stats_exe.root_module.addFrameworkPath(.{ .cwd_relative = "/System/Library/Frameworks" });
-            stats_exe.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
-        }
-    }
 
     const install_stats = b.addInstallArtifact(stats_exe, .{
         .dest_dir = .{ .override = .prefix },

@@ -29,7 +29,7 @@ pub fn main(init: std.process.Init) !void {
 
     try std.Io.Dir.cwd().createDirPath(init.io, config.report_dir);
 
-    var watcher_inst = try watcher.Watcher.init(allocator, init.io, config.watch_path);
+    var watcher_inst = try watcher.Watcher.init(allocator, init.io, config.watch_path, .{});
     defer watcher_inst.deinit();
 
     const backend = watcherBackend();
@@ -210,10 +210,10 @@ fn parseDuration(value: []const u8) !u64 {
 
 fn watcherBackend() []const u8 {
     return switch (builtin.os.tag) {
-        .linux => "inotify",
-        .macos => "fsevents",
-        .windows => "ReadDirectoryChangesW",
-        else => "unknown",
+        .linux => "nightwatch-inotify",
+        .macos => "nightwatch-kqueue",
+        .windows => "nightwatch-ReadDirectoryChangesW",
+        else => "nightwatch-unknown",
     };
 }
 

@@ -4,6 +4,10 @@ This document records every problem encountered while setting up GitHub Actions 
 (cross-platform Zig 0.15.x build with macOS FSEvents support) and the exact fixes applied.
 The goal is a reference so future CI changes don't rediscover the same pitfalls.
 
+> Historical note: the native macOS FSEvents watcher and the CoreServices / FSEvents build
+> sections below were removed when the watcher moved to nightwatch. The generic `--sysroot`
+> setup still applies; the `-Dmacos-sdk` option no longer exists.
+
 ---
 
 ## Summary of Working Setup

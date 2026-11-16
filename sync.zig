@@ -53,6 +53,17 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (config.watch_backend == .fsmeta and
+        (config.folders.len > 0 or config.local_copy_workers.len > 0))
+    {
+        std.debug.print(
+            "Error: the fs-meta Unix-socket watcher backend is not implemented yet (socket: {s}).\n" ++
+                "Use watch_backend=nightwatch for now.\n",
+            .{config.fsmeta_socket orelse "<unset>"},
+        );
+        std.process.exit(1);
+    }
+
     // Initialize local copy workers (they don't need SSH)
     var local_workers = try allocator.alloc(local_worker.LocalCopyWorker, config.local_copy_workers.len);
     defer {
@@ -203,7 +214,10 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("Initial sync completed in {d:.2} seconds for {s}.\n\n", .{ sync_duration, folder.local_dir });
 
         // Initialize watcher
-        const watcher_inst = try ssh_worker.Watcher.init(allocator, init.io, folder.local_dir);
+        const watcher_inst = try ssh_worker.Watcher.init(allocator, init.io, folder.local_dir, .{
+            .backend = config.watch_backend,
+            .fsmeta_socket = config.fsmeta_socket,
+        });
 
         folder_syncs[i] = .{
             .folder = folder,

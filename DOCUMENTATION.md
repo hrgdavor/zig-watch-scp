@@ -173,6 +173,8 @@ EOF
 | `port`             | `22`          | SSH port                                        |
 | `parallel_threads` | `4`           | Upload threads for initial sync                 |
 | `watch_delay_ms`   | `200`         | Debounce delay for file-change events (ms)      |
+| `watch_backend`    | `nightwatch`  | `nightwatch` or `fsmeta` (reserved, see below)  |
+| `fsmeta_socket`    | —             | fs-meta Unix socket path (reserved backend)     |
 | `compress`         | `false`       | Enable SSH compression                          |
 | `cleanup`          | `false`       | Remove remote files missing locally             |
 | `dry_run`          | `false`       | Dry run mode (don't upload or delete)           |
@@ -204,6 +206,40 @@ EOF
 | `version_from` | Per-folder override for version template    |
 | `version_to`   | Per-folder override for version remote path |
 | `version_name` | Per-folder override for project name        |
+
+### Watcher Backends
+
+`zig-watch-scp` depends on `fs-meta` as its primary watcher dependency. That
+pins `nightwatch` transitively, and the watcher code imports nightwatch through
+fs-meta instead of declaring a separate top-level nightwatch dependency.
+
+The implemented backend is **nightwatch**:
+
+```ini
+watch_backend=nightwatch
+```
+
+Nightwatch supplies the platform watcher: inotify on Linux, ReadDirectoryChangesW
+on Windows, and kqueue on macOS/BSD. The old hand-written inotify /
+ReadDirectoryChangesW / FSEvents watchers were removed so there is one event
+pipeline and one set of semantics.
+
+An **fs-meta Unix-socket** backend is reserved:
+
+```ini
+watch_backend=fsmeta
+fsmeta_socket=/run/user/1000/fs-meta/project.sock
+```
+
+That backend is not implemented yet. Selecting it currently fails at startup
+with a clear `fs-meta Unix-socket watcher backend is not implemented yet`
+message. The intended use case is a dev project that already runs fs-meta:
+fs-meta watches the project's non-gitignored sources, while zig-watch-scp watches
+ignored build outputs, so the two tools share one event source instead of arming
+competing watchers.
+
+The nightwatch path remains the integral default and is not replaced by the
+fs-meta integration.
 
 ### Config Variable Expansion
 
@@ -478,7 +514,7 @@ Supported in `includes` and `excludes`:
    - Removes remote files missing locally
 
 3. **Watch Mode** (if `-w`):
-   - Spawns watcher threads per folder pair
+   - Spawns nightwatch watcher threads per folder pair
    - On change: uploads if different, updates `.scpdb`
 
 ---
