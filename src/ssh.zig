@@ -610,6 +610,28 @@ pub const SshSession = struct {
         }
     }
 
+    /// Rename a remote file (used for atomic database checkpoint writes).
+    pub fn renameRemoteFile(self: *SshSession, old_path: []const u8, new_path: []const u8) !void {
+        const sftp = try self.getSftp();
+        const old_path_z = try self.allocator.dupeSentinel(u8, old_path, 0);
+        defer self.allocator.free(old_path_z);
+        const new_path_z = try self.allocator.dupeSentinel(u8, new_path, 0);
+        defer self.allocator.free(new_path_z);
+
+        if (c.libssh2_sftp_rename_ex(
+            sftp,
+            old_path_z.ptr,
+            @intCast(old_path.len),
+            new_path_z.ptr,
+            @intCast(new_path.len),
+            c.LIBSSH2_SFTP_RENAME_OVERWRITE,
+        ) != 0) {
+            const err_code = c.libssh2_sftp_last_error(sftp);
+            std.debug.print("Warning: Failed to rename remote file '{s}' to '{s}'. SFTP error code: {}\n", .{ old_path, new_path, err_code });
+            return error.RemoteRenameFailed;
+        }
+    }
+
     /// Remove a remote directory
     pub fn removeRemoteDir(self: *SshSession, remote_path: []const u8) !void {
         const sftp = try self.getSftp();

@@ -467,6 +467,10 @@ Supported in `includes` and `excludes`:
    - Scans local directories in parallel
    - Detects changes using Wyhash64 or `mtime`+`size`
    - Uploads only changed/new files
+   - Checkpoints `.scpdb` every 5 seconds during large uploads, so a crash or
+     network failure only loses the files uploaded since the last checkpoint.
+     Database writes use a temp file plus rename, so an interrupted save cannot
+     truncate the previous good database.
    - Prunes `.scpdb`: removes entries for files no longer present locally
 
 2. **Initial Cleanup** (if `--cleanup`):
