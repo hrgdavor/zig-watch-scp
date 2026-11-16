@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-GPL-3.0-with-Commons-Clause
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -12,10 +13,21 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const nightwatch_dep = fs_meta_dep.builder.dependency("nightwatch", .{
-        .target = target,
-        .optimize = optimize,
-    });
+    // Native macOS builds use FSEvents (the backend this tool used before the
+    // nightwatch move). Cross-builds from non-macOS hosts keep kqueue because
+    // the FSEvents path needs the Xcode frameworks.
+    const use_fsevents = target.result.os.tag == .macos and builtin.os.tag == .macos;
+    const nightwatch_dep = if (use_fsevents)
+        fs_meta_dep.builder.dependency("nightwatch", .{
+            .target = target,
+            .optimize = optimize,
+            .macos_fsevents = true,
+        })
+    else
+        fs_meta_dep.builder.dependency("nightwatch", .{
+            .target = target,
+            .optimize = optimize,
+        });
 
     const use_zlib = target.result.os.tag != .windows;
 

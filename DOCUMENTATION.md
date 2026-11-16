@@ -220,9 +220,14 @@ watch_backend=nightwatch
 ```
 
 Nightwatch supplies the platform watcher: inotify on Linux, ReadDirectoryChangesW
-on Windows, and kqueue on macOS/BSD. The old hand-written inotify /
-ReadDirectoryChangesW / FSEvents watchers were removed so there is one event
-pipeline and one set of semantics.
+on Windows, FSEvents on native macOS builds, and kqueue on BSD or macOS
+cross-builds. The old hand-written inotify / ReadDirectoryChangesW / FSEvents
+watchers were removed so there is one event pipeline and one set of semantics.
+
+Nightwatch does **not** read `.gitignore` and does not hide ignored build outputs.
+Everything below `local_dir` is watched; only `includes` / `excludes` from
+`sync.conf` decide what is synced. This is deliberate: the tool usually copies
+build artifacts that are gitignored.
 
 An **fs-meta Unix-socket** backend is reserved:
 

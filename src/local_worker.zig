@@ -186,6 +186,10 @@ pub fn watchLocalCopyThread(lw: *LocalCopyWorker) void {
 
                 defer allocator.free(event.path);
 
+                if (config.verbose) {
+                    std.debug.print("LocalWatcher event {s}: {s}\n", .{ @tagName(event.kind), event.path });
+                }
+
                 if (event.kind == .created or event.kind == .modified) {
                     if (!lw.shouldCopyFile(event.path, ss.source)) continue;
 

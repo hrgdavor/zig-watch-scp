@@ -436,6 +436,10 @@ pub fn watchFolderThread(
 
             defer allocator.free(event.path);
 
+            if (config.verbose) {
+                std.debug.print("[{s}] event {s}: {s}\n", .{ fs.folder.local_dir, @tagName(event.kind), event.path });
+            }
+
             if (event.kind == .created or event.kind == .modified) {
                 if (!shouldSyncFile(event.path, fs.folder)) continue;
 

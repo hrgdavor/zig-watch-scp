@@ -32,7 +32,7 @@ The tool syncs only changed files on startup, then watches and re-syncs on every
 ## What It Can Do
 
 - **Multiple folder pairs** — sync several directories in one config, with per-folder include/exclude patterns
-- **Cross-platform watching** — nightwatch backends: inotify (Linux), ReadDirectoryChangesW (Windows), kqueue (macOS/BSD)
+- **Cross-platform watching** — nightwatch backends: inotify (Linux), ReadDirectoryChangesW (Windows), FSEvents (native macOS), kqueue (BSD and macOS cross-builds)
 - **Fast change detection** — content hashing (default) or `mtime`+`size` for large binary trees
 - **SSH agent support** — works with KeePassXC and other agents; no credentials in config files
 - **SSH config integration** — use `~/.ssh/config` aliases as the `host` value

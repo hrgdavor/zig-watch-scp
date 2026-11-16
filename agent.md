@@ -87,7 +87,8 @@ These removals/renames are relevant to this codebase:
   top-level `nightwatch` dependency.
 - `src/watcher.zig` always uses the nightwatch-based `NightwatchWatcher`.
   The old hand-written inotify / ReadDirectoryChangesW / FSEvents files were
-  removed; keep one event pipeline.
+  removed; keep one event pipeline. Native macOS builds enable nightwatch's
+  `macos_fsevents` option; macOS cross-builds fall back to kqueue.
 - The `Watcher` is a runtime union so an fs-meta Unix-socket backend can be
   added later. `watch_backend=nightwatch` is the implemented default;
   `watch_backend=fsmeta` is reserved and currently exits at startup with
