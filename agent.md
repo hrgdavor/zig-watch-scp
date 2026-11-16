@@ -97,6 +97,10 @@ These removals/renames are relevant to this codebase:
 - Nightwatch retains pointers to the handler for the watcher lifetime.
   `NightwatchWatcher` must be heap-allocated (`create`) and passed by pointer;
   never return it by value or the callbacks will point at a dead stack frame.
+- Nightwatch emits absolute event paths. The watch root must be canonicalized
+  with `std.Io.Dir.cwd().realPathFileAlloc`, not `std.fs.path.resolve` (which
+  keeps relative paths relative). Otherwise a relative `local_dir` breaks the
+  relative-path strip and watch mode silently stops matching files.
 - The fs-meta socket path is for the next step: fs-meta watches non-gitignored
   project files, while zig-watch-scp watches ignored build outputs. The
   nightwatch path remains the integral default.

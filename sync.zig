@@ -214,10 +214,17 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("Initial sync completed in {d:.2} seconds for {s}.\n\n", .{ sync_duration, folder.local_dir });
 
         // Initialize watcher
-        const watcher_inst = try ssh_worker.Watcher.init(allocator, init.io, folder.local_dir, .{
+        var watcher_inst = try ssh_worker.Watcher.init(allocator, init.io, folder.local_dir, .{
             .backend = config.watch_backend,
             .fsmeta_socket = config.fsmeta_socket,
         });
+        if (config.verbose) {
+            std.debug.print("[{s}] Watch backend {s}: {d} registration(s)\n", .{
+                folder.local_dir,
+                @tagName(config.watch_backend),
+                watcher_inst.watchCount(),
+            });
+        }
 
         folder_syncs[i] = .{
             .folder = folder,

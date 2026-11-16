@@ -13,7 +13,11 @@ pub const NightwatchWatcher = struct {
     event_count: std.atomic.Value(u32),
 
     pub fn create(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !*NightwatchWatcher {
-        const resolved_path = try std.fs.path.resolve(allocator, &.{path});
+        // Make the watch root absolute and canonical. Nightwatch backends emit
+        // absolute event paths; if base_path kept a relative local_dir, the
+        // relative-path strip in normalizePath would fail and watch mode would
+        // silently see no matching files.
+        const resolved_path = try std.Io.Dir.cwd().realPathFileAlloc(io, path, allocator);
         defer allocator.free(resolved_path);
 
         const self = try allocator.create(NightwatchWatcher);
@@ -57,6 +61,10 @@ pub const NightwatchWatcher = struct {
         defer self.mutex.unlock(self.io);
         if (self.event_queue.items.len == 0) return null;
         return self.event_queue.orderedRemove(0);
+    }
+
+    pub fn watchCount(self: *NightwatchWatcher) usize {
+        return self.watcher.watch_count();
     }
 
     pub fn wait(self: *NightwatchWatcher, timeout_ms: u32) !void {

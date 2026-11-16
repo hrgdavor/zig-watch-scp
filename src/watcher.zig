@@ -55,4 +55,10 @@ pub const Watcher = union(enum) {
             .nightwatch => |watcher| watcher.nextEvent(),
         };
     }
+
+    pub fn watchCount(self: *Watcher) usize {
+        return switch (self.*) {
+            .nightwatch => |watcher| watcher.watchCount(),
+        };
+    }
 };
