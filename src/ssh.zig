@@ -16,6 +16,14 @@ pub const SshSession = struct {
     /// Directories already created on the remote host during this session, so
     /// an upload of N files in one directory makes one mkdir chain, not N.
     created_dirs: std.StringHashMap(void),
+
+    /// Serializes connect + handshake + authentication. libssh2's mbedTLS
+    /// backend uses one process-global DRBG for handshake-time public-key
+    /// operations (RSA/ECDSA key agreement, signing), so two logins must not
+    /// overlap. Packet padding is guarded separately by the vendored
+    /// `third_party/libssh2/crypto.c`, which is what allows the data transfer
+    /// phase to run in parallel again.
+    pub var connect_mutex = std.Io.Mutex.init;
     pub const FileInfo = struct { size: u64, mtime: i64 }; // mtime in milliseconds since epoch
 
     pub fn libInit() !void {
@@ -72,6 +80,12 @@ pub const SshSession = struct {
         dir_mode: u32,
         verbose: bool,
     ) !SshSession {
+        // Serialize logins: the mbedTLS backend shares one DRBG for the
+        // handshake's public-key work. Data transfers may run in parallel
+        // because packet padding is locked by third_party/libssh2/crypto.c.
+        try connect_mutex.lock(io);
+        defer connect_mutex.unlock(io);
+
         // Note: libssh2_init should be called once in main() for thread safety
         // if (c.libssh2_init(0) != 0) {
         //     return error.LibsshInitFailed;

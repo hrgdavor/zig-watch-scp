@@ -171,7 +171,7 @@ EOF
 | `key_path`         | —             | Path to SSH private key                                  |
 | `passphrase`       | —             | Passphrase for private key                               |
 | `port`             | `22`          | SSH port                                                 |
-| `parallel_threads` | `4`           | Threads for scanning/hashing; SSH uploads are serialized |
+| `parallel_threads` | `4`           | Threads for hashing and parallel uploads                 |
 | `watch_delay_ms`   | `200`         | Debounce delay for file-change events (ms)               |
 | `watch_backend`    | `nightwatch`  | `nightwatch` or `fsmeta` (reserved, see below)           |
 | `fsmeta_socket`    | —             | fs-meta Unix socket path (reserved backend)              |
@@ -540,17 +540,21 @@ Supported in `includes` and `excludes`:
    - Downloads `.scpdb` for each remote folder (if exists and `no_db=false`)
    - Scans and hashes local directories in parallel
    - Detects changes using Wyhash64 or `mtime`+`size`
-   - Uploads only changed/new files, one file at a time. SSH transfers are
-     serialized because the bundled libssh2 crypto backend keeps process-wide
-     RNG state that every packet's padding draws from; parallel sessions race on
-     it and crash the process (`Illegal instruction`, heap corruption).
-     `parallel_threads` therefore parallelizes hashing, not transfers.
+   - Uploads changed/new files in parallel (`parallel_threads`), one SSH session
+     per worker. Logins are serialized, and the vendored
+     `third_party/libssh2/crypto.c` locks the mbedTLS backend's process-global
+     RNG, so concurrent sessions no longer corrupt each other.
+   - An empty or missing `.scpdb` means nothing is known about the server, so
+     every file is uploaded. Conversely, a folder with **no local files** leaves
+     the database untouched: an empty local tree (wrong working directory, not
+     built yet) must never wipe a good database.
    - A file only enters `.scpdb` after its upload completed and the SFTP handle
      closed successfully, so an interrupted transfer is retried on the next run.
    - Checkpoints `.scpdb` every 5 seconds during large uploads, so a crash or
      network failure only loses the files uploaded since the last checkpoint;
      the next run resumes from there. Database writes use a temp file plus
      rename, so an interrupted save cannot truncate the previous good database.
+     An empty database is never written.
    - Prunes `.scpdb`: removes entries for files no longer present locally
 
 2. **Initial Cleanup** (if `--cleanup`):

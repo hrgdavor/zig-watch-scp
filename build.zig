@@ -36,24 +36,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const libssh2_dep = b.dependency("libssh2", .{
-        .target = target,
-        .optimize = optimize,
-        .@"crypto-backend" = .mbedtls,
-        .@"link-system-crypto-backend" = false,
-        .zlib = use_zlib,
-    });
-
-    const ssh2_lib = libssh2_dep.artifact("ssh2");
+    // libssh2 is built from the pinned upstream sources with our
+    // third_party/libssh2/crypto.c override, which makes the mbedTLS backend's
+    // process-global RNG safe for parallel sessions. See that file's header
+    // comment for the full story.
+    const ssh2_lib = addLibssh2(b, target, optimize, use_zlib);
+    ssh2_lib.root_module.linkLibrary(mbedtls_dep.artifact("mbedtls"));
     if (target.result.os.tag != .windows) {
-        // The upstream Zig package does not define this, so libssh2 fails to put
-        // its socket in non-blocking mode on POSIX. Its blocking API then hangs
-        // in the channel-write drain loop (notably at the first SFTP write).
+        // Zig does not define this, so libssh2 fails to put its socket in
+        // non-blocking mode on POSIX. Its blocking API then hangs in the
+        // channel-write drain loop (notably at the first SFTP write).
         ssh2_lib.root_module.addCMacro("HAVE_O_NONBLOCK", "1");
     }
-    // libssh2 pulls in its own pinned zlib dependency when `use_zlib` is enabled.
-    // No separate top-level zlib dependency is needed.
-    ssh2_lib.root_module.linkLibrary(mbedtls_dep.artifact("mbedtls"));
 
     const exe = b.addExecutable(.{
         .name = "sync",
@@ -65,7 +59,7 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.linkLibrary(mbedtls_dep.artifact("mbedtls"));
-    exe.root_module.linkLibrary(libssh2_dep.artifact("ssh2"));
+    exe.root_module.linkLibrary(ssh2_lib);
     exe.root_module.link_libc = true;
 
     if (target.result.os.tag == .windows) {
@@ -172,3 +166,97 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 }
+
+/// Build libssh2 1.11.1 from the pinned `libssh2_upstream` sources, replacing
+/// `src/crypto.c` with `third_party/libssh2/crypto.c` (thread-safe mbedTLS
+/// RNG). Keeping the build here means the patch travels with the repository and
+/// the release builds get no new system dependencies.
+fn addLibssh2(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    use_zlib: bool,
+) *std.Build.Step.Compile {
+    const upstream = b.dependency("libssh2_upstream", .{});
+    const is_windows = target.result.os.tag == .windows;
+
+    const config_header = b.addConfigHeader(.{
+        .style = .{
+            .cmake = upstream.path("src/libssh2_config_cmake.h.in"),
+        },
+        .include_path = "libssh2_config.h",
+    }, .{
+        .LIBSSH2_API = if (is_windows) "__declspec(dllexport)" else "",
+        .HAVE_SYS_UIO_H = !is_windows,
+        .HAVE_SYS_SOCKET_H = !is_windows,
+        .HAVE_NETINET_IN_H = !is_windows,
+        .HAVE_ARPA_INET_H = !is_windows,
+        .HAVE_INTTYPES_H = true,
+    });
+
+    const ssh2_lib = b.addLibrary(.{
+        .name = "ssh2",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+
+    ssh2_lib.root_module.addConfigHeader(config_header);
+    ssh2_lib.root_module.addIncludePath(upstream.path("include"));
+    ssh2_lib.root_module.addIncludePath(upstream.path("src"));
+    ssh2_lib.root_module.addCMacro("HAVE_CONFIG_H", "1");
+    ssh2_lib.root_module.addCMacro("LIBSSH2_MBEDTLS", "1");
+
+    ssh2_lib.root_module.addCSourceFiles(.{
+        .files = libssh2_sources,
+        .root = upstream.path(""),
+        .flags = &.{},
+    });
+    ssh2_lib.root_module.addCSourceFile(.{
+        .file = b.path("third_party/libssh2/crypto.c"),
+        .flags = &.{},
+    });
+
+    if (use_zlib) {
+        // Not part of the CMake config template; it enables comp.c's zlib code.
+        ssh2_lib.root_module.addCMacro("LIBSSH2_HAVE_ZLIB", "1");
+        if (b.lazyDependency("zlib", .{ .target = target, .optimize = optimize })) |zlib_dep| {
+            ssh2_lib.root_module.linkLibrary(zlib_dep.artifact("z"));
+        }
+    }
+
+    return ssh2_lib;
+}
+
+/// Upstream libssh2 1.11.1 sources, minus `src/crypto.c` (replaced above).
+const libssh2_sources: []const []const u8 = &.{
+    "src/agent.c",
+    "src/bcrypt_pbkdf.c",
+    "src/blowfish.c",
+    "src/chacha.c",
+    "src/channel.c",
+    "src/cipher-chachapoly.c",
+    "src/comp.c",
+    "src/crypt.c",
+    "src/global.c",
+    "src/hostkey.c",
+    "src/keepalive.c",
+    "src/kex.c",
+    "src/knownhost.c",
+    "src/mac.c",
+    "src/misc.c",
+    "src/packet.c",
+    "src/pem.c",
+    "src/poly1305.c",
+    "src/publickey.c",
+    "src/scp.c",
+    "src/session.c",
+    "src/sftp.c",
+    "src/transport.c",
+    "src/userauth.c",
+    "src/userauth_kbd_packet.c",
+    "src/version.c",
+};

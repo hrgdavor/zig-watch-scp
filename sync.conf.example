@@ -11,9 +11,7 @@ key_path=~/.ssh/id_rsa
 # Passphrase for the private key (optional)
 # passphrase=secret
 
-# Threads used to scan and hash local files (default: 4).
-# SSH transfers are serialized: the bundled libssh2 crypto backend keeps
-# process-wide RNG state, so parallel SSH sessions corrupt memory.
+# Number of parallel threads for hashing and uploads (default: 4)
 parallel_threads=8
 
 # Delay in milliseconds before starting sync after a change is detected (default: 200)

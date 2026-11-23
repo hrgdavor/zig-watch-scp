@@ -167,7 +167,6 @@ pub fn main(init: std.process.Init) !void {
         // Setup DB path and load database. `db_loc.resolve` is the single
         // source of truth: the same value is used to save the database later.
         var db_path: []const u8 = ""; // empty default (literal, no allocation)
-        var db_missing = false;
         var remote_db = ChecksumDb.init(allocator);
 
         if (!folder.no_db) {
@@ -180,9 +179,11 @@ pub fn main(init: std.process.Init) !void {
                     remote_db.deinit();
                     remote_db = try ChecksumDb.deserialize(allocator, content);
                     std.debug.print("Loaded local database: {s} ({} entries)\n", .{ db_path, remote_db.entries.count() });
+                    if (remote_db.entries.count() == 0) {
+                        std.debug.print("Database {s} is empty; treating the folder as not synced.\n", .{db_path});
+                    }
                 } else |err| {
                     if (err == error.FileNotFound) {
-                        db_missing = true;
                         std.debug.print("No local database found at {s}, starting fresh.\n", .{db_path});
                     } else {
                         std.debug.print("Warning: cannot read local database {s} ({s}); starting fresh.\n", .{ db_path, @errorName(err) });
@@ -204,13 +205,15 @@ pub fn main(init: std.process.Init) !void {
                         remote_db.deinit();
                         remote_db = try ChecksumDb.deserialize(allocator, content);
                         if (config.verbose) std.debug.print("Loaded remote database with {} entries.\n", .{remote_db.entries.count()});
+                        if (remote_db.entries.count() == 0) {
+                            std.debug.print("Database {s} is empty; treating the folder as not synced.\n", .{db_path});
+                        }
                     } else |err| {
                         std.debug.print("Warning: cannot read downloaded database {s} ({s}); starting fresh.\n", .{ db_path, @errorName(err) });
                     }
                 } else |err| {
                     ssh_worker.ssh_mutex.unlock(init.io);
                     if (err == error.RemoteFileOpenFailed) {
-                        db_missing = true;
                         std.debug.print("No database found on the server at {s}; syncing this folder in full once.\n", .{db_path});
                     } else {
                         remote_db.deinit();
@@ -225,7 +228,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Perform initial sync with timing
         const t0 = std.Io.Timestamp.now(init.io, .boot);
-        if (try ssh_worker.performInitialSync(allocator, init.io, &config, folder, &ssh, &remote_db, db_path, db_missing, printer)) {
+        if (try ssh_worker.performInitialSync(allocator, init.io, init.minimal.environ, &config, folder, &ssh, &remote_db, db_path, printer)) {
             any_changes = true;
         }
         const elapsed_ns = t0.durationTo(std.Io.Timestamp.now(init.io, .boot)).nanoseconds;

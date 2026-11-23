@@ -7,6 +7,7 @@ const SshSession = @import("ssh.zig").SshSession;
 const ChecksumDb = @import("checksum_db.zig").ChecksumDb;
 const db_loc = @import("db_path.zig");
 const Scanner = @import("scanner.zig").Scanner;
+const FileEntry = @import("scanner.zig").FileEntry;
 pub const Watcher = @import("watcher.zig").Watcher;
 const checksum_db = @import("checksum_db.zig");
 const ansi = @import("ansi.zig");
@@ -15,6 +16,8 @@ pub var ssh_mutex = std.Io.Mutex.init;
 
 /// How often a long initial sync checkpoints its checksum database.
 const checkpoint_interval_ns: u64 = 5 * std.time.ns_per_s;
+/// How often the checkpoint thread wakes up to check the interval.
+const checkpoint_poll_ns: u64 = 250 * std.time.ns_per_ms;
 
 pub const FolderSync = struct {
     folder: *const Folder,
@@ -29,14 +32,12 @@ pub const FolderSync = struct {
 pub fn performInitialSync(
     allocator: std.mem.Allocator,
     io: std.Io,
+    environ: std.process.Environ,
     config: *const Config,
     folder: *const Folder,
     ssh: *SshSession,
     remote_db: *ChecksumDb,
     remote_db_path: []const u8,
-    /// True when no database existed yet for this folder. Used to persist an
-    /// empty database for a folder that has nothing to upload.
-    db_missing: bool,
     printer: ansi.Printer,
 ) !bool {
     var scanner = Scanner.init(allocator, io, config, folder);
@@ -46,12 +47,14 @@ pub fn performInitialSync(
     try scanner.scanDirectory();
     if (config.verbose) std.debug.print("Found {} local files.\n", .{scanner.files.items.len});
 
-    // Drop entries for files that no longer exist locally, so a deleted file or
-    // folder cannot hide in the database forever.
+    // An empty local tree says nothing about what is on the server: it may be a
+    // build folder that has not been populated yet, or a mistyped working
+    // directory. Pruning there would wipe a good database and force a full
+    // re-sync later, so prune only when there is something to compare against.
     var present = std.StringHashMap(void).init(allocator);
     defer present.deinit();
     for (scanner.files.items) |entry| try present.put(entry.path, {});
-    const pruned = remote_db.prune(&present);
+    const pruned = if (scanner.files.items.len == 0) 0 else remote_db.prune(&present);
 
     var changed_files = try scanner.getChangedFiles(remote_db);
     defer {
@@ -62,7 +65,13 @@ pub fn performInitialSync(
     }
 
     if (changed_files.items.len == 0) {
-        if ((pruned > 0 or db_missing) and !config.dry_run and !folder.no_db) {
+        if (scanner.files.items.len == 0) {
+            std.debug.print(
+                "[{s}] No local files found; leaving the checksum database untouched.\n",
+                .{folder.local_dir},
+            );
+        }
+        if (pruned > 0 and !config.dry_run and !folder.no_db) {
             saveDatabaseLocked(allocator, io, config, folder, remote_db, ssh, remote_db_path, config.verbose) catch |err| {
                 std.debug.print("Warning: could not persist pruned database: {s}\n", .{@errorName(err)});
             };
@@ -73,44 +82,96 @@ pub fn performInitialSync(
 
     std.debug.print("Uploading {} changed files for {s}...\n", .{ changed_files.items.len, folder.local_dir });
 
-    // Uploads run over one SSH session, one file at a time. The bundled
-    // libssh2 mbedtls backend keeps a process-global entropy/CTR_DRBG state
-    // that every outgoing packet draws its padding from, so two sessions
-    // sending at the same time race on it and corrupt memory (observed as
-    // "Illegal instruction", heap corruption and crashes in
-    // _libssh2_transport_send / session_free). `parallel_threads` therefore
-    // parallelizes local scanning and hashing, not SSH transfers.
     // Files whose upload could not be completed must not enter the database,
     // otherwise the next run would consider them synced and skip them.
     var failed_uploads = std.StringHashMap(void).init(allocator);
     defer failed_uploads.deinit();
 
-    var last_checkpoint_ns = std.Io.Timestamp.now(io, .boot).nanoseconds;
-    for (changed_files.items, 1..) |entry, i| {
-        if (config.dry_run) {
-            std.debug.print("[{}/{}] Dry-run: Would sync: {s}\n", .{ i, changed_files.items.len, entry.path });
-            continue;
+    // Parallel transfers are safe because the vendored libssh2 crypto.c locks
+    // the mbedTLS backend's process-global RNG, and SshSession.init serializes
+    // logins (handshake-time public-key work uses the same RNG).
+    const num_threads = @min(config.parallel_threads, changed_files.items.len);
+
+    if (num_threads <= 1) {
+        var last_checkpoint_ns = std.Io.Timestamp.now(io, .boot).nanoseconds;
+        for (changed_files.items, 1..) |entry, i| {
+            if (config.dry_run) {
+                std.debug.print("[{}/{}] Dry-run: Would sync: {s}\n", .{ i, changed_files.items.len, entry.path });
+                continue;
+            }
+
+            std.debug.print("[{}/{}] Syncing: {s}\n", .{ i, changed_files.items.len, entry.path });
+            syncFile(allocator, config, folder, ssh, entry.path) catch |err| switch (err) {
+                error.UploadIncomplete, error.UploadCloseFailed => {
+                    failed_uploads.put(entry.path, {}) catch {};
+                    continue;
+                },
+                else => return err,
+            };
+            try remote_db.put(entry.path, entry.checksum, entry.mtime, entry.size);
+            printer.printc(.yellow, "[{}/{}] Synced: {s}\n", .{ i, changed_files.items.len, entry.path });
+
+            if (!folder.no_db) {
+                const now = std.Io.Timestamp.now(io, .boot).nanoseconds;
+                if (now - last_checkpoint_ns >= @as(i128, checkpoint_interval_ns)) {
+                    saveDatabase(allocator, io, config, folder, remote_db, ssh, remote_db_path, config.verbose) catch |err| {
+                        std.debug.print("Warning: database checkpoint failed: {s}\n", .{@errorName(err)});
+                    };
+                    last_checkpoint_ns = now;
+                }
+            }
+        }
+    } else {
+        var stop_checkpoint = std.atomic.Value(bool).init(false);
+        var work_ctx = WorkContext{
+            .allocator = allocator,
+            .io = io,
+            .environ = environ,
+            .config = config,
+            .folder = folder,
+            .ssh = ssh,
+            .remote_db = remote_db,
+            .remote_db_path = remote_db_path,
+            .files = changed_files.items,
+            .next_index = 0,
+            .completed = 0,
+            .total = changed_files.items.len,
+            .mutex = std.Io.Mutex.init,
+            .has_error = false,
+            .failed = &failed_uploads,
+            .stop_checkpoint = &stop_checkpoint,
+            .printer = printer,
+        };
+
+        const threads = try allocator.alloc(std.Thread, num_threads);
+        defer allocator.free(threads);
+
+        var checkpoint_thread: ?std.Thread = null;
+        if (!config.dry_run and !folder.no_db) {
+            checkpoint_thread = try std.Thread.spawn(.{}, checkpointWorker, .{&work_ctx});
+        }
+        defer if (checkpoint_thread) |thread| {
+            stop_checkpoint.store(true, .release);
+            thread.join();
+        };
+
+        for (threads) |*thread| {
+            thread.* = try std.Thread.spawn(.{}, uploadWorker, .{&work_ctx});
         }
 
-        std.debug.print("[{}/{}] Syncing: {s}\n", .{ i, changed_files.items.len, entry.path });
-        syncFile(allocator, config, folder, ssh, entry.path) catch |err| switch (err) {
-            error.UploadIncomplete, error.UploadCloseFailed => {
-                failed_uploads.put(entry.path, {}) catch {};
-                continue;
-            },
-            else => return err,
-        };
-        try remote_db.put(entry.path, entry.checksum, entry.mtime, entry.size);
-        printer.printc(.yellow, "[{}/{}] Synced: {s}\n", .{ i, changed_files.items.len, entry.path });
+        for (threads) |thread| {
+            thread.join();
+        }
 
-        if (!folder.no_db) {
-            const now = std.Io.Timestamp.now(io, .boot).nanoseconds;
-            if (now - last_checkpoint_ns >= @as(i128, checkpoint_interval_ns)) {
-                saveDatabase(allocator, io, config, folder, remote_db, ssh, remote_db_path, config.verbose) catch |err| {
-                    std.debug.print("Warning: database checkpoint failed: {s}\n", .{@errorName(err)});
-                };
-                last_checkpoint_ns = now;
-            }
+        // Stop checkpointing before the final database rebuild below.
+        if (checkpoint_thread) |thread| {
+            stop_checkpoint.store(true, .release);
+            thread.join();
+            checkpoint_thread = null;
+        }
+
+        if (work_ctx.has_error) {
+            return error.UploadFailed;
         }
     }
 
@@ -206,6 +267,158 @@ pub fn performCleanup(
         std.debug.print("Cleanup: Removed {} orphaned files.\n", .{removed_count});
     } else {
         std.debug.print("Cleanup: No orphaned files found.\n", .{});
+    }
+}
+
+pub const WorkContext = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ: std.process.Environ,
+    config: *const Config,
+    folder: *const Folder,
+    ssh: *SshSession,
+    remote_db: *ChecksumDb,
+    remote_db_path: []const u8,
+    files: []const FileEntry,
+    next_index: usize,
+    completed: usize,
+    total: usize,
+    mutex: std.Io.Mutex,
+    has_error: bool,
+    /// Files whose transfer did not complete; kept out of the database.
+    failed: *std.StringHashMap(void),
+    stop_checkpoint: *std.atomic.Value(bool),
+    printer: ansi.Printer,
+};
+
+pub fn uploadWorker(ctx: *WorkContext) void {
+    var local_ssh: ?SshSession = null;
+    defer if (local_ssh) |*s| s.deinit();
+
+    // Each worker gets its own session; logins are serialized inside
+    // SshSession.init, and packet handling is safe thanks to the vendored
+    // thread-safe RNG.
+    local_ssh = SshSession.init(
+        ctx.allocator,
+        ctx.io,
+        ctx.environ,
+        ctx.config.host,
+        ctx.config.username,
+        ctx.config.password,
+        ctx.config.key_path,
+        ctx.config.passphrase,
+        ctx.config.compress,
+        ctx.config.file_mode,
+        ctx.config.dir_mode,
+        ctx.config.verbose,
+    ) catch |err| {
+        std.debug.print("Worker failed to connect: {s}\n", .{@errorName(err)});
+        ctx.mutex.lock(ctx.io) catch {};
+        ctx.has_error = true;
+        ctx.mutex.unlock(ctx.io);
+        return;
+    };
+
+    while (true) {
+        ctx.mutex.lock(ctx.io) catch break;
+        if (ctx.next_index >= ctx.files.len) {
+            ctx.mutex.unlock(ctx.io);
+            break;
+        }
+        const index = ctx.next_index;
+        ctx.next_index += 1;
+        ctx.mutex.unlock(ctx.io);
+
+        const entry = ctx.files[index];
+
+        if (ctx.config.dry_run) {
+            std.debug.print("[{}/{}] Dry-run: Would sync: {s}\n", .{ index + 1, ctx.total, entry.path });
+        } else {
+            syncFile(ctx.allocator, ctx.config, ctx.folder, &local_ssh.?, entry.path) catch |err| switch (err) {
+                error.UploadIncomplete, error.UploadCloseFailed => {
+                    ctx.mutex.lock(ctx.io) catch {};
+                    ctx.failed.put(entry.path, {}) catch {};
+                    ctx.mutex.unlock(ctx.io);
+                    continue;
+                },
+                else => {
+                    std.debug.print("Upload failed for {s}: {s}\n", .{ entry.path, @errorName(err) });
+                    ctx.mutex.lock(ctx.io) catch {};
+                    ctx.has_error = true;
+                    ctx.mutex.unlock(ctx.io);
+                    continue;
+                },
+            };
+        }
+
+        ctx.mutex.lock(ctx.io) catch {};
+        ctx.completed += 1;
+        if (!ctx.config.dry_run) {
+            ctx.remote_db.put(entry.path, entry.checksum, entry.mtime, entry.size) catch {};
+        }
+        const completed = ctx.completed;
+        const total = ctx.total;
+        ctx.mutex.unlock(ctx.io);
+
+        ctx.printer.printc(.yellow, "[{}/{}] Synced: {s}\n", .{ completed, total, entry.path });
+    }
+}
+
+/// Serialize the current in-memory database and persist it.
+fn checkpointOnce(ctx: *WorkContext, saved_completed: *usize) !void {
+    ctx.mutex.lock(ctx.io) catch return;
+    const completed = ctx.completed;
+    if (completed == saved_completed.*) {
+        ctx.mutex.unlock(ctx.io);
+        return;
+    }
+
+    var aw = std.Io.Writer.Allocating.init(ctx.allocator);
+    defer aw.deinit();
+
+    ctx.remote_db.serialize(&aw.writer) catch |err| {
+        ctx.mutex.unlock(ctx.io);
+        return err;
+    };
+    ctx.mutex.unlock(ctx.io);
+
+    // A remote database write uses the main session; local databases do not.
+    if (!ctx.folder.local_db) {
+        try ssh_mutex.lock(ctx.io);
+        defer ssh_mutex.unlock(ctx.io);
+    }
+
+    try saveDatabaseData(
+        ctx.allocator,
+        ctx.io,
+        ctx.config,
+        ctx.folder,
+        aw.writer.buffer[0..aw.writer.end],
+        ctx.ssh,
+        ctx.remote_db_path,
+        ctx.config.verbose,
+    );
+    saved_completed.* = completed;
+}
+
+/// Periodically persists uploaded-file hashes during a long initial sync, so a
+/// crash or network failure only loses the files uploaded since the last save.
+fn checkpointWorker(ctx: *WorkContext) void {
+    var saved_completed: usize = 0;
+    var last_save_ns = std.Io.Timestamp.now(ctx.io, .boot).nanoseconds;
+
+    while (!ctx.stop_checkpoint.load(.acquire)) {
+        ctx.io.sleep(std.Io.Duration.fromNanoseconds(@intCast(checkpoint_poll_ns)), .boot) catch break;
+        if (ctx.stop_checkpoint.load(.acquire)) break;
+
+        const now = std.Io.Timestamp.now(ctx.io, .boot).nanoseconds;
+        if (now - last_save_ns < @as(i128, checkpoint_interval_ns)) continue;
+
+        checkpointOnce(ctx, &saved_completed) catch |err| {
+            std.debug.print("Warning: database checkpoint failed: {s}\n", .{@errorName(err)});
+            continue;
+        };
+        last_save_ns = now;
     }
 }
 
@@ -729,6 +942,9 @@ fn saveDatabaseData(
 ) !void {
     if (folder.no_db) return;
     if (db_path.len == 0) return error.MissingDatabasePath;
+    // Never write an empty database: a 0-entry file carries no information and
+    // would replace a useful database (or litter an empty remote folder).
+    if (data.len == 0) return;
 
     if (folder.local_db) {
         if (announce) std.debug.print("[{s}] Saving database locally to {s}...\n", .{ folder.local_dir, db_path });
