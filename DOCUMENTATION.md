@@ -207,6 +207,36 @@ EOF
 | `version_to`   | Per-folder override for version remote path |
 | `version_name` | Per-folder override for project name        |
 
+These keys belong to a `[folder]` section. Placed in the global section they are
+ignored, and the parser prints a warning for them.
+
+**Each folder keeps its own database.** A folder's `.scpdb` defaults to
+`<remote_dir>/.scpdb` (`local_db=false`) or `<local_dir>/.scpdb`
+(`local_db=true`). Two folders may not resolve to the same database file: the
+run stops with a config error, because the folders would overwrite each other's
+entries and every run would re-upload both in full. Give such folders a distinct
+`scpdb` value:
+
+```ini
+[folder]
+local_dir=./a
+remote_dir=/srv/app
+scpdb=.scpdb.a
+
+[folder]
+local_dir=./b
+remote_dir=/srv/app
+scpdb=.scpdb.b
+```
+
+Database files are metadata: they are never scanned, uploaded, watched or
+removed by cleanup, even when a folder's `local_dir` contains another folder's
+database.
+
+A missing `local_dir` is created before the sync instead of aborting the run, so
+build-output folders can be listed before they exist. Files deleted locally are
+dropped from the database on the next run (no `--cleanup` needed for that).
+
 ### Watcher Backends
 
 `zig-watch-scp` depends on `fs-meta` as its primary watcher dependency. That
@@ -333,12 +363,15 @@ sync put ./local/file.txt /remote/path/file.txt -c sync.conf
 
 - **`local_db=true`**: Saves `.scpdb` locally — keeps remote directories clean of metadata.
 - **Absolute Paths**: If `scpdb` is an absolute path, it bypasses relative resolution.
-  - `local_db=false` → absolute path on the **remote** server.
+  - `local_db=false` → absolute path on the **remote** server (used exactly as written; its directory is created on the server if needed).
   - `local_db=true` → absolute path on the **local** machine.
+- **Uniqueness**: each folder needs its own database file. Sharing one is
+  rejected before the connection is opened.
 
 Benefits:
 - **Clean Remotes**: No sync metadata in production/remote folders.
-- **Centralized Metadata**: All `.scpdb` files in one local directory.
+- **Centralized Metadata**: All `.scpdb` files in one local directory, e.g.
+  `scpdb=/var/lib/sync/app.scpdb` and `scpdb=/var/lib/sync/docs.scpdb`.
 - **Reliability**: Avoids remote filesystem latency when reading/writing the database.
 
 ### Key-based Authentication

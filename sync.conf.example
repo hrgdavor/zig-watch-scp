@@ -42,6 +42,11 @@ cleanup=false
 
 [folder]
 scpdb=.scpdb
+# Database file for THIS folder. Every folder must keep its own .scpdb: two
+# folders that resolve to the same file (same remote_dir with the default name,
+# or the same absolute scpdb) would overwrite each other's entries and re-upload
+# everything on every run. With a shared remote_dir, give each folder a name:
+#   scpdb=.scpdb.project-a
 # create an index in local folder, optional, default .scpdb
 local_db=false
 # Local directory to watch and sync

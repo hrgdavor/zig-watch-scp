@@ -365,7 +365,14 @@ pub const SshSession = struct {
             c.LIBSSH2_SFTP_OPENFILE,
         ) orelse {
             const err_code = c.libssh2_sftp_last_error(sftp);
-            std.debug.print("CRITICAL: Failed to open remote file '{s}' for reading. SFTP error code: {}\n", .{ remote_path, err_code });
+            // SSH_FX_NO_SUCH_FILE (2) is a normal outcome for an optional file
+            // such as a first-run checksum database; only real failures deserve
+            // a scary message.
+            if (err_code == 2) {
+                std.debug.print("Remote file not found: {s}\n", .{remote_path});
+            } else {
+                std.debug.print("CRITICAL: Failed to open remote file '{s}' for reading. SFTP error code: {}\n", .{ remote_path, err_code });
+            }
             return error.RemoteFileOpenFailed;
         };
         defer _ = c.libssh2_sftp_close(remote_file);

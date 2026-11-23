@@ -5,6 +5,7 @@ const Config = @import("config.zig").Config;
 const Folder = @import("config.zig").Folder;
 const SshSession = @import("ssh.zig").SshSession;
 const ChecksumDb = @import("checksum_db.zig").ChecksumDb;
+const db_loc = @import("db_path.zig");
 const Scanner = @import("scanner.zig").Scanner;
 const FileEntry = @import("scanner.zig").FileEntry;
 pub const Watcher = @import("watcher.zig").Watcher;
@@ -22,6 +23,9 @@ pub const FolderSync = struct {
     folder: *const Folder,
     remote_db: ChecksumDb,
     remote_db_path: []const u8,
+    /// Database files inside the synced tree (see `db_path`), used to keep
+    /// databases out of scans, watch events and cleanup.
+    db_rels: []const []const u8,
     watcher: Watcher,
 };
 
@@ -34,12 +38,24 @@ pub fn performInitialSync(
     ssh: *SshSession,
     remote_db: *ChecksumDb,
     remote_db_path: []const u8,
+    /// True when no database existed yet for this folder. Used to persist an
+    /// empty database for a folder that has nothing to upload.
+    db_missing: bool,
     printer: ansi.Printer,
 ) !bool {
     var scanner = Scanner.init(allocator, io, config, folder);
     defer scanner.deinit();
+    const db_rels = db_loc.relPathsInTree(allocator, io, config.folders, folder) catch &[_][]const u8{};
+    defer db_loc.freeRelPaths(allocator, db_rels);
     try scanner.scanDirectory();
     if (config.verbose) std.debug.print("Found {} local files.\n", .{scanner.files.items.len});
+
+    // Drop entries for files that no longer exist locally, so a deleted file or
+    // folder cannot hide in the database forever.
+    var present = std.StringHashMap(void).init(allocator);
+    defer present.deinit();
+    for (scanner.files.items) |entry| try present.put(entry.path, {});
+    const pruned = remote_db.prune(&present);
 
     var changed_files = try scanner.getChangedFiles(remote_db);
     defer {
@@ -50,6 +66,11 @@ pub fn performInitialSync(
     }
 
     if (changed_files.items.len == 0) {
+        if ((pruned > 0 or db_missing) and !config.dry_run and !folder.no_db) {
+            saveDatabaseLocked(allocator, io, config, folder, remote_db, ssh, remote_db_path, config.verbose) catch |err| {
+                std.debug.print("Warning: could not persist pruned database: {s}\n", .{@errorName(err)});
+            };
+        }
         if (config.verbose) std.debug.print("Folder {s} is up to date!\n", .{folder.local_dir});
         return false;
     }
@@ -160,7 +181,7 @@ pub fn performInitialSync(
         for (scanner.files.items) |entry| {
             try local_paths.put(entry.path, {});
         }
-        try performCleanup(allocator, config, folder, ssh, &local_paths);
+        try performCleanup(allocator, config, folder, ssh, &local_paths, db_rels);
     }
 
     if (config.exec_cmd) |cmd| {
@@ -186,6 +207,7 @@ pub fn performCleanup(
     folder: *const Folder,
     ssh: *SshSession,
     local_files: *std.StringHashMap(void),
+    db_rels: []const []const u8,
 ) !void {
     std.debug.print("Cleanup: Checking remote files for {s}...\n", .{folder.remote_dir});
     const remote_files = try ssh.listRemoteFilesRecursive(allocator, folder.remote_dir);
@@ -204,11 +226,11 @@ pub fn performCleanup(
             // Normalize slashes for consistency
             // (Remote paths from SFTP should already use forward slashes)
 
-            // Skip .scpdb itself
-            if (std.mem.eql(u8, rel_path, folder.scpdb)) continue;
+            // Never delete the folder's own database file, wherever it lives.
+            if (db_loc.matchesAnyDatabaseFile(rel_path, db_rels)) continue;
 
             // Check if it matches include/exclude
-            if (shouldSyncFile(rel_path, folder)) {
+            if (shouldSyncFile(rel_path, folder, db_rels)) {
                 // If it matches patterns but isn't in local_files, delete it
                 if (!local_files.contains(rel_path)) {
                     if (config.dry_run) {
@@ -441,7 +463,7 @@ pub fn watchFolderThread(
             }
 
             if (event.kind == .created or event.kind == .modified) {
-                if (!shouldSyncFile(event.path, fs.folder)) continue;
+                if (!shouldSyncFile(event.path, fs.folder, fs.db_rels)) continue;
 
                 const target_time = @as(i64, @intCast(@divTrunc(std.Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_ms))) + @as(i64, @intCast(config.watch_delay_ms));
 
@@ -489,6 +511,10 @@ pub fn processReadySync(
     rel_path: []const u8,
     printer: ansi.Printer,
 ) !void {
+    // The database file is metadata; uploading it would corrupt the remote
+    // database (and, with `local_db`, would leak it into the synced tree).
+    if (db_loc.matchesAnyDatabaseFile(rel_path, fs.db_rels)) return;
+
     const local_path = try std.fs.path.join(allocator, &[_][]const u8{ fs.folder.local_dir, rel_path });
     defer allocator.free(local_path);
 
@@ -599,7 +625,9 @@ pub fn processReadySync(
     printer.printc(.yellow, "[{s}] Synced: {s}\n\n", .{ fs.folder.local_dir, rel_path });
 }
 
-pub fn shouldSyncFile(path: []const u8, folder: *const Folder) bool {
+pub fn shouldSyncFile(path: []const u8, folder: *const Folder, db_rels: []const []const u8) bool {
+    // Database files are metadata, never content.
+    if (db_loc.matchesAnyDatabaseFile(path, db_rels)) return false;
     for (folder.exclude_patterns) |pattern| {
         if (Scanner.matchPattern(path, pattern)) return false;
     }
@@ -850,8 +878,31 @@ pub fn saveDatabase(
     try saveDatabaseData(allocator, io, config, folder, aw.writer.buffer[0..aw.writer.end], ssh, db_path, announce);
 }
 
+/// Save the database, taking the shared SSH session lock only for a remote
+/// database (a local database write does not touch the session).
+pub fn saveDatabaseLocked(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    config: *const Config,
+    folder: *const Folder,
+    db: *ChecksumDb,
+    ssh: *SshSession,
+    db_path: []const u8,
+    announce: bool,
+) !void {
+    if (!folder.local_db) {
+        try ssh_mutex.lock(io);
+        defer ssh_mutex.unlock(io);
+    }
+    try saveDatabase(allocator, io, config, folder, db, ssh, db_path, announce);
+}
+
 /// Write or upload an already-serialized database. Used both by the final save
 /// and by periodic checkpoints during a long initial sync.
+///
+/// `db_path` is the single resolved database location produced by
+/// `db_path.resolve`, so the load and the save can never disagree about where
+/// a folder keeps its database.
 fn saveDatabaseData(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -863,20 +914,15 @@ fn saveDatabaseData(
     announce: bool,
 ) !void {
     if (folder.no_db) return;
+    if (db_path.len == 0) return error.MissingDatabasePath;
 
     if (folder.local_db) {
-        const full_path = if (std.fs.path.isAbsolute(folder.scpdb))
-            try allocator.dupe(u8, folder.scpdb)
-        else
-            try std.fs.path.resolve(allocator, &[_][]const u8{ folder.local_dir, folder.scpdb });
-        defer allocator.free(full_path);
-
-        if (announce) std.debug.print("[{s}] Saving database locally to {s}...\n", .{ folder.local_dir, full_path });
-        std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(full_path) orelse ".") catch {};
+        if (announce) std.debug.print("[{s}] Saving database locally to {s}...\n", .{ folder.local_dir, db_path });
+        std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(db_path) orelse ".") catch {};
 
         // Write a sibling temp file first so a crash cannot truncate the
         // previous good database.
-        const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{full_path});
+        const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{db_path});
         defer allocator.free(tmp_path);
 
         {
@@ -887,9 +933,17 @@ fn saveDatabaseData(
             try file_writer.interface.writeAll(data);
             try file_writer.interface.flush();
         }
-        try std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), full_path, io);
+        try std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), db_path, io);
     } else {
         if (announce) std.debug.print("[{s}] Uploading database to {s}...\n", .{ folder.local_dir, db_path });
+
+        // A custom database path may point at a directory that does not exist
+        // yet (e.g. `scpdb = /var/lib/sync/app.scpdb`).
+        if (std.fs.path.dirname(db_path)) |parent| {
+            if (parent.len > 0 and !std.mem.eql(u8, parent, "/") and !std.mem.eql(u8, parent, ".")) {
+                ssh.createRemoteDir(parent) catch {};
+            }
+        }
 
         // Upload to a temp path, then rename over the live database.
         const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{db_path});

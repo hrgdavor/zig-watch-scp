@@ -3,6 +3,7 @@
 const std = @import("std");
 const checksum_db = @import("checksum_db.zig");
 const config_pkg = @import("config.zig");
+const db_path = @import("db_path.zig");
 const Config = config_pkg.Config;
 const Folder = config_pkg.Folder;
 
@@ -21,8 +22,17 @@ pub const Scanner = struct {
     files: std.ArrayList(FileEntry),
     io: std.Io,
     mutex: std.Io.Mutex,
+    /// Database files that live inside this folder's tree (this folder's own
+    /// database and any nested folder's database), relative to `local_dir`.
+    /// They are metadata and must never be scanned as content.
+    db_rels: []const []const u8,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, config: *const Config, folder: *const Folder) Scanner {
+        var rels: []const []const u8 = &[_][]const u8{};
+        if (db_path.relPathsInTree(allocator, io, config.folders, folder)) |list| {
+            rels = list;
+        } else |_| {}
+
         return .{
             .allocator = allocator,
             .io = io,
@@ -30,6 +40,7 @@ pub const Scanner = struct {
             .folder = folder,
             .files = std.ArrayList(FileEntry).empty,
             .mutex = std.Io.Mutex.init,
+            .db_rels = rels,
         };
     }
 
@@ -38,6 +49,7 @@ pub const Scanner = struct {
             self.allocator.free(entry.path);
         }
         self.files.deinit(self.allocator);
+        db_path.freeRelPaths(self.allocator, self.db_rels);
     }
 
     pub fn scanDirectory(self: *Scanner) !void {
@@ -97,6 +109,9 @@ pub const Scanner = struct {
     }
 
     fn shouldIncludeFile(self: *Scanner, path: []const u8) bool {
+        // Never treat a checksum database as syncable content.
+        if (db_path.matchesAnyDatabaseFile(path, self.db_rels)) return false;
+
         // Check exclude patterns
         for (self.folder.exclude_patterns) |pattern| {
             if (matchPattern(path, pattern)) return false;

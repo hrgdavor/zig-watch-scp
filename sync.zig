@@ -8,6 +8,10 @@ const Scanner = @import("src/scanner.zig").Scanner;
 const ssh_worker = @import("src/ssh_worker.zig");
 const local_worker = @import("src/local_worker.zig");
 const ansi = @import("src/ansi.zig");
+const db_loc = @import("src/db_path.zig");
+
+/// Upper bound for reading a checksum database (local or downloaded).
+const max_db_size: u64 = 10 * 1024 * 1024;
 
 pub fn main(init: std.process.Init) !void {
     try SshSession.libInit();
@@ -52,6 +56,14 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("Error: No sync folders or local copy workers configured.\n", .{});
         return;
     }
+
+    // Every folder must keep its own database. Two folders resolving to the
+    // same file would overwrite each other's entries, so each run would see an
+    // empty database and re-upload that folder in full, forever.
+    validateDatabaseTargets(allocator, &config) catch |err| switch (err) {
+        error.DatabaseLocationConflict => std.process.exit(1),
+        else => return err,
+    };
 
     if (config.watch_backend == .fsmeta and
         (config.folders.len > 0 or config.local_copy_workers.len > 0))
@@ -137,42 +149,46 @@ pub fn main(init: std.process.Init) !void {
         for (folder_syncs[0..folder_syncs_count]) |*fs| {
             fs.remote_db.deinit();
             if (fs.remote_db_path.len > 0) allocator.free(fs.remote_db_path);
+            if (fs.db_rels.len > 0) db_loc.freeRelPaths(allocator, fs.db_rels);
             fs.watcher.deinit();
         }
         allocator.free(folder_syncs);
     }
 
     var any_changes = false;
-    for (config.folders, 0..) |*folder, i| {
+    for (config.folders) |*folder| {
         std.debug.print("\n=== Initializing folder: {s} ===\n", .{folder.local_dir});
 
-        // Setup DB path and load database
-        const is_absolute_db = std.fs.path.isAbsolute(folder.scpdb);
+        // A missing local directory is created instead of aborting the whole
+        // run; build output folders (target/classes, dist, ...) regularly do
+        // not exist yet on a fresh checkout.
+        if (!ensureLocalDir(init.io, folder.local_dir)) continue;
+
+        // Setup DB path and load database. `db_loc.resolve` is the single
+        // source of truth: the same value is used to save the database later.
         var db_path: []const u8 = ""; // empty default (literal, no allocation)
+        var db_missing = false;
         var remote_db = ChecksumDb.init(allocator);
 
         if (!folder.no_db) {
-            if (folder.local_db) {
-                db_path = if (is_absolute_db)
-                    try allocator.dupe(u8, folder.scpdb)
-                else
-                    try std.fs.path.resolve(allocator, &[_][]const u8{ folder.local_dir, folder.scpdb });
+            const resolved = try db_loc.resolve(allocator, folder);
+            db_path = resolved.path;
 
-                if (std.Io.Dir.cwd().readFileAlloc(init.io, db_path, allocator, std.Io.Limit.limited(10 * 1024 * 1024))) |content| {
+            if (resolved.kind == .local) {
+                if (std.Io.Dir.cwd().readFileAlloc(init.io, db_path, allocator, std.Io.Limit.limited(max_db_size))) |content| {
                     defer allocator.free(content);
                     remote_db.deinit();
                     remote_db = try ChecksumDb.deserialize(allocator, content);
                     std.debug.print("Loaded local database: {s} ({} entries)\n", .{ db_path, remote_db.entries.count() });
-                } else |_| {
-                    std.debug.print("No local database found at {s}, starting fresh.\n", .{db_path});
+                } else |err| {
+                    if (err == error.FileNotFound) {
+                        db_missing = true;
+                        std.debug.print("No local database found at {s}, starting fresh.\n", .{db_path});
+                    } else {
+                        std.debug.print("Warning: cannot read local database {s} ({s}); starting fresh.\n", .{ db_path, @errorName(err) });
+                    }
                 }
             } else {
-                const remote_db_path_win = try std.fs.path.join(allocator, &[_][]const u8{ folder.remote_dir, folder.scpdb });
-                defer allocator.free(remote_db_path_win);
-                const mutable_db_path = try allocator.dupe(u8, remote_db_path_win);
-                std.mem.replaceScalar(u8, mutable_db_path, '\\', '/');
-                db_path = mutable_db_path;
-
                 if (config.verbose) std.debug.print("Downloading remote checksum database from {s}...\n", .{db_path});
                 var random_id: u64 = undefined;
                 init.io.random(std.mem.asBytes(&random_id));
@@ -182,17 +198,20 @@ pub fn main(init: std.process.Init) !void {
                 ssh_worker.ssh_mutex.lock(init.io) catch {};
                 if (ssh.downloadFile(db_path, tmp_path)) |_| {
                     ssh_worker.ssh_mutex.unlock(init.io);
-                    if (std.Io.Dir.cwd().readFileAlloc(init.io, tmp_path, allocator, std.Io.Limit.limited(1024 * 1024))) |content| {
+                    if (std.Io.Dir.cwd().readFileAlloc(init.io, tmp_path, allocator, std.Io.Limit.limited(max_db_size))) |content| {
                         defer std.Io.Dir.cwd().deleteFile(init.io, tmp_path) catch {};
                         defer allocator.free(content);
                         remote_db.deinit();
                         remote_db = try ChecksumDb.deserialize(allocator, content);
                         if (config.verbose) std.debug.print("Loaded remote database with {} entries.\n", .{remote_db.entries.count()});
-                    } else |_| {}
+                    } else |err| {
+                        std.debug.print("Warning: cannot read downloaded database {s} ({s}); starting fresh.\n", .{ db_path, @errorName(err) });
+                    }
                 } else |err| {
                     ssh_worker.ssh_mutex.unlock(init.io);
                     if (err == error.RemoteFileOpenFailed) {
-                        if (config.verbose) std.debug.print("No remote database found, starting fresh sync.\n", .{});
+                        db_missing = true;
+                        std.debug.print("No database found on the server at {s}; syncing this folder in full once.\n", .{db_path});
                     } else {
                         remote_db.deinit();
                         if (db_path.len > 0) allocator.free(db_path);
@@ -206,7 +225,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Perform initial sync with timing
         const t0 = std.Io.Timestamp.now(init.io, .boot);
-        if (try ssh_worker.performInitialSync(allocator, init.io, init.minimal.environ, &config, folder, &ssh, &remote_db, db_path, printer)) {
+        if (try ssh_worker.performInitialSync(allocator, init.io, init.minimal.environ, &config, folder, &ssh, &remote_db, db_path, db_missing, printer)) {
             any_changes = true;
         }
         const elapsed_ns = t0.durationTo(std.Io.Timestamp.now(init.io, .boot)).nanoseconds;
@@ -226,10 +245,11 @@ pub fn main(init: std.process.Init) !void {
             });
         }
 
-        folder_syncs[i] = .{
+        folder_syncs[folder_syncs_count] = .{
             .folder = folder,
             .remote_db = remote_db,
             .remote_db_path = db_path,
+            .db_rels = db_loc.relPathsInTree(allocator, init.io, config.folders, folder) catch &[_][]const u8{},
             .watcher = watcher_inst,
         };
         folder_syncs_count += 1;
@@ -240,20 +260,21 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (config.watch) {
+        const watcher_count = folder_syncs_count + local_workers.len;
         // Start watching all folders
-        std.debug.print("\nStarting file watchers for {} folders...\n", .{folder_syncs.len + local_workers.len});
+        std.debug.print("\nStarting file watchers for {} folders...\n", .{watcher_count});
         std.debug.print("Press Ctrl+C to stop.\n\n", .{});
 
         // For simplicity, we create a thread for each folder watcher
-        var threads = try allocator.alloc(std.Thread, folder_syncs.len + local_workers.len);
+        var threads = try allocator.alloc(std.Thread, watcher_count);
         defer allocator.free(threads);
 
-        for (folder_syncs, 0..) |*fs, i| {
+        for (folder_syncs[0..folder_syncs_count], 0..) |*fs, i| {
             threads[i] = try std.Thread.spawn(.{}, ssh_worker.watchFolderThread, .{ allocator, init.io, &config, &ssh, fs, printer });
         }
 
         for (local_workers, 0..) |*lw, i| {
-            threads[folder_syncs.len + i] = try std.Thread.spawn(.{}, local_worker.watchLocalCopyThread, .{lw});
+            threads[folder_syncs_count + i] = try std.Thread.spawn(.{}, local_worker.watchLocalCopyThread, .{lw});
         }
 
         // Join threads
@@ -263,6 +284,85 @@ pub fn main(init: std.process.Init) !void {
     } else {
         std.debug.print("\nSync completed. Watch mode not enabled (-w to enable).\n", .{});
     }
+}
+
+/// Make sure a folder's local directory exists. A missing directory is created
+/// (build output folders often do not exist yet); a path that cannot be used is
+/// reported and the folder is skipped instead of aborting the whole run.
+fn ensureLocalDir(io: std.Io, dir: []const u8) bool {
+    const stat = std.Io.Dir.cwd().statFile(io, dir, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.debug.print("[{s}] Local directory does not exist; creating it.\n", .{dir});
+            std.Io.Dir.cwd().createDirPath(io, dir) catch |create_err| {
+                std.debug.print(
+                    "Warning: cannot create local_dir '{s}' ({s}); skipping this folder.\n",
+                    .{ dir, @errorName(create_err) },
+                );
+                return false;
+            };
+            return true;
+        },
+        else => {
+            std.debug.print(
+                "Warning: local_dir '{s}' is not accessible ({s}); skipping this folder.\n",
+                .{ dir, @errorName(err) },
+            );
+            return false;
+        },
+    };
+    if (stat.kind != .directory) {
+        std.debug.print("Warning: local_dir '{s}' is not a directory; skipping this folder.\n", .{dir});
+        return false;
+    }
+    return true;
+}
+
+/// Reject configurations where two folders would share one checksum database.
+/// Each folder must keep its own database: a shared file makes the folders
+/// overwrite each other's entries, so every run re-uploads both in full.
+fn validateDatabaseTargets(allocator: std.mem.Allocator, config: *const Config) !void {
+    if (config.folders.len < 2) return;
+
+    var seen = std.StringHashMap([]const u8).init(allocator);
+    defer {
+        var it = seen.keyIterator();
+        while (it.next()) |key| allocator.free(key.*);
+        seen.deinit();
+    }
+
+    var conflicts: usize = 0;
+    for (config.folders) |*folder| {
+        if (folder.no_db) continue;
+
+        const resolved = db_loc.resolve(allocator, folder) catch continue;
+        const key = try std.fmt.allocPrint(allocator, "{s}:{s}", .{
+            if (resolved.kind == .local) "local" else "remote",
+            resolved.path,
+        });
+
+        if (seen.get(key)) |first| {
+            std.debug.print(
+                "Config error: folders '{s}' and '{s}' would share one checksum database.\n" ++
+                    "  Database location: {s}\n" ++
+                    "  Each folder must keep its own .scpdb, otherwise they overwrite each\n" ++
+                    "  other's entries and every run re-uploads every file. Give each folder a\n" ++
+                    "  distinct 'scpdb' value, for example:\n" ++
+                    "    [folder]\n" ++
+                    "    local_dir = {s}\n" ++
+                    "    scpdb = .scpdb.<unique-name>\n",
+                .{ first, folder.local_dir, resolved.path, folder.local_dir },
+            );
+            allocator.free(resolved.path);
+            allocator.free(key);
+            conflicts += 1;
+            continue;
+        }
+
+        allocator.free(resolved.path);
+        try seen.put(key, folder.local_dir);
+    }
+
+    if (conflicts > 0) return error.DatabaseLocationConflict;
 }
 
 fn handleCreateDb(allocator: std.mem.Allocator, io: anytype, config: *const Config, folder_path: []const u8) !void {

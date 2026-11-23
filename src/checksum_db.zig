@@ -46,6 +46,25 @@ pub const ChecksumDb = struct {
         return self.entries.get(path);
     }
 
+    /// Drop entries whose path is not in `keep`. Returns how many entries were
+    /// removed. Keys are freed, so this must only be called on a database that
+    /// the caller still owns.
+    pub fn prune(self: *ChecksumDb, keep: *const std.StringHashMap(void)) usize {
+        var doomed = std.ArrayList([]const u8).empty;
+        defer doomed.deinit(self.allocator);
+
+        var it = self.entries.keyIterator();
+        while (it.next()) |key_ptr| {
+            if (keep.contains(key_ptr.*)) continue;
+            doomed.append(self.allocator, key_ptr.*) catch return 0;
+        }
+
+        for (doomed.items) |key| {
+            if (self.entries.fetchRemove(key)) |kv| self.allocator.free(kv.key);
+        }
+        return doomed.items.len;
+    }
+
     pub fn serialize(self: *const ChecksumDb, writer: anytype) !void {
         const Entry = struct { path: []const u8, hash: u64, mtime: i64, size: u64 };
         var list = std.ArrayList(Entry).empty;

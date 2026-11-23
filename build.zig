@@ -73,7 +73,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const build_opts = b.addOptions();
-    
+
     // Extract version from build.zig.zon
     const version = v: {
         b.dependOnFileContents(b.path("build.zig.zon"));
@@ -155,7 +155,7 @@ pub fn build(b: *std.Build) void {
     stats_step.dependOn(&stats_exe.step);
 
     const test_step = b.step("test", "Run unit tests");
-    for ([_][]const u8{ "src/config_test.zig", "src/glob_test.zig" }) |test_path| {
+    for ([_][]const u8{ "src/config_test.zig", "src/glob_test.zig", "src/db_path_test.zig" }) |test_path| {
         const test_exe = b.addTest(.{
             .name = std.fs.path.stem(test_path),
             .root_module = b.createModule(.{

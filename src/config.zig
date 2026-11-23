@@ -561,6 +561,11 @@ pub const Config = struct {
         } else try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, std.Io.Limit.limited(1024 * 1024));
         defer allocator.free(content);
 
+        // Editors on Windows often save config files with a UTF-8 BOM. Without
+        // stripping it the very first "[folder]" header is not recognized, its
+        // settings land in global scope and the whole folder silently vanishes.
+        const body = if (std.mem.startsWith(u8, content, "\xEF\xBB\xBF")) content[3..] else content;
+
         // --- Pass 1: collect ENV.VARNAME= defaults from global scope ---
         // These act as fallbacks when a real environment variable is not set.
         var env_defaults = std.StringHashMap([]const u8).init(allocator);
@@ -573,12 +578,15 @@ pub const Config = struct {
             env_defaults.deinit();
         }
         {
-            var pre_iter = std.mem.splitScalar(u8, content, '\n');
+            var pre_iter = std.mem.splitScalar(u8, body, '\n');
             var in_global = true;
             while (pre_iter.next()) |raw_line| {
                 const tl = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
                 if (tl.len == 0 or tl[0] == '#') continue;
-                if (tl[0] == '[') { in_global = false; continue; }
+                if (tl[0] == '[') {
+                    in_global = false;
+                    continue;
+                }
                 if (!in_global) continue;
                 const eq = std.mem.indexOf(u8, tl, "=") orelse continue;
                 const k = std.mem.trim(u8, tl[0..eq], &std.ascii.whitespace);
@@ -643,24 +651,19 @@ pub const Config = struct {
                 check: CheckMode,
                 no_db: bool,
                 single_file: bool,
+                line_no: usize,
             ) !void {
-                if (l_dir.* == null and r_dir.* == null and inc.items.len == 0 and exc.items.len == 0 and t_to.* == null and v_to.* == null) return;
-                try f_list.append(alloc, .{
-                    .scpdb = scpdb.* orelse try alloc.dupe(u8, ".scpdb"),
-                    .local_db = local_db,
-                    .local_dir = l_dir.* orelse try alloc.dupe(u8, "."),
-                    .remote_dir = r_dir.* orelse try alloc.dupe(u8, "."),
-                    .include_patterns = try inc.toOwnedSlice(alloc),
-                    .exclude_patterns = try exc.toOwnedSlice(alloc),
-                    .trigger_from = t_from.*,
-                    .trigger_to = t_to.*,
-                    .version_from = v_from.*,
-                    .version_to = v_to.*,
-                    .version_name = v_name.*,
-                    .check = check,
-                    .no_db = no_db,
-                    .single_file = single_file,
-                });
+                // Take ownership of the section state and reset it *before*
+                // deciding anything, so a skipped or incomplete section can
+                // never leak its values (notably `scpdb`) into the next one.
+                const local_dir = l_dir.*;
+                const remote_dir = r_dir.*;
+                const db = scpdb.*;
+                const trigger_from = t_from.*;
+                const trigger_to = t_to.*;
+                const version_from = v_from.*;
+                const version_to = v_to.*;
+                const version_name = v_name.*;
                 l_dir.* = null;
                 r_dir.* = null;
                 scpdb.* = null;
@@ -669,6 +672,38 @@ pub const Config = struct {
                 v_from.* = null;
                 v_to.* = null;
                 v_name.* = null;
+                const includes = try inc.toOwnedSlice(alloc);
+                const excludes = try exc.toOwnedSlice(alloc);
+
+                if (local_dir == null and remote_dir == null and includes.len == 0 and excludes.len == 0 and
+                    trigger_to == null and version_to == null)
+                {
+                    // A `[folder]` section without the required directories is
+                    // a configuration mistake. Reporting it is much better than
+                    // silently dropping it (and its `scpdb` setting).
+                    std.debug.print(
+                        "Config error: [folder] section ending at line {d} has no local_dir/remote_dir; every [folder] needs both.\n",
+                        .{line_no},
+                    );
+                    return error.IncompleteFolderSection;
+                }
+
+                try f_list.append(alloc, .{
+                    .scpdb = db orelse try alloc.dupe(u8, ".scpdb"),
+                    .local_db = local_db,
+                    .local_dir = local_dir orelse try alloc.dupe(u8, "."),
+                    .remote_dir = remote_dir orelse try alloc.dupe(u8, "."),
+                    .include_patterns = includes,
+                    .exclude_patterns = excludes,
+                    .trigger_from = trigger_from,
+                    .trigger_to = trigger_to,
+                    .version_from = version_from,
+                    .version_to = version_to,
+                    .version_name = version_name,
+                    .check = check,
+                    .no_db = no_db,
+                    .single_file = single_file,
+                });
             }
         }.push;
 
@@ -706,13 +741,15 @@ pub const Config = struct {
             }
         }.push;
 
-        var lines = std.mem.splitScalar(u8, content, '\n');
+        var lines = std.mem.splitScalar(u8, body, '\n');
+        var line_no: usize = 0;
         while (lines.next()) |line| {
+            line_no += 1;
             const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
             if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
             if (std.mem.eql(u8, trimmed, "[folder]")) {
-                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db, cur_single_file);
+                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db, cur_single_file, line_no);
                 if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
                 if (section == .local_folder) try pushLocalWorker(allocator, &local_copy_workers, &cur_dest_dir, &cur_sources);
                 section = .folder;
@@ -724,7 +761,7 @@ pub const Config = struct {
             }
 
             if (std.mem.eql(u8, trimmed, "[file]")) {
-                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db, cur_single_file);
+                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db, cur_single_file, line_no);
                 if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
                 if (section == .local_folder) try pushLocalWorker(allocator, &local_copy_workers, &cur_dest_dir, &cur_sources);
                 section = .file;
@@ -736,7 +773,7 @@ pub const Config = struct {
             }
 
             if (std.mem.eql(u8, trimmed, "[local-folder]")) {
-                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db, cur_single_file);
+                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db, cur_single_file, line_no);
                 if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
                 if (section == .local_folder) try pushLocalWorker(allocator, &local_copy_workers, &cur_dest_dir, &cur_sources);
                 section = .local_folder;
@@ -745,7 +782,7 @@ pub const Config = struct {
             }
 
             if (std.mem.eql(u8, trimmed, "[source]")) {
-                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db, cur_single_file);
+                if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db, cur_single_file, line_no);
                 if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
                 section = .source;
                 cur_single_file = false;
@@ -758,6 +795,33 @@ pub const Config = struct {
 
                 // ENV.VARNAME= lines are collected in pass 1; skip them here
                 if (std.mem.startsWith(u8, key, "ENV.")) continue;
+
+                // Per-folder settings are silently ignored at global scope, which
+                // is a common trap in multi-folder configs (a single
+                // `scpdb = ...` at the top then does nothing). Say so.
+                if (section == .global) {
+                    const folder_only = std.mem.eql(u8, key, "scpdb") or
+                        std.mem.eql(u8, key, "local_db") or
+                        std.mem.eql(u8, key, "no_db") or
+                        std.mem.eql(u8, key, "check") or
+                        std.mem.eql(u8, key, "local_dir") or
+                        std.mem.eql(u8, key, "remote_dir") or
+                        std.mem.eql(u8, key, "include") or
+                        std.mem.eql(u8, key, "includes") or
+                        std.mem.eql(u8, key, "exclude") or
+                        std.mem.eql(u8, key, "excludes") or
+                        std.mem.eql(u8, key, "trigger_from") or
+                        std.mem.eql(u8, key, "trigger_to") or
+                        std.mem.eql(u8, key, "dest_dir") or
+                        std.mem.eql(u8, key, "local_file");
+                    if (folder_only) {
+                        std.debug.print(
+                            "Config warning: '{s}' at line {d} only applies inside a [folder] section and is ignored here.\n",
+                            .{ key, line_no },
+                        );
+                        continue;
+                    }
+                }
 
                 // Expand ${VARNAME} placeholders; caller frees the owned result
                 const value = try expandVars(allocator, raw_value, environ, cli_vars, &env_defaults);
@@ -882,7 +946,7 @@ pub const Config = struct {
             }
         }
 
-        if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db, cur_single_file);
+        if (section == .folder or section == .file) try pushFolder(allocator, &cur_scpdb, cur_local_db, &folders, &cur_local_dir, &cur_remote_dir, &cur_includes, &cur_excludes, &cur_trigger_from, &cur_trigger_to, &cur_version_from, &cur_version_to, &cur_version_name, cur_check, cur_no_db, cur_single_file, line_no);
         if (section == .source) try pushLocalSource(allocator, &cur_sources, &cur_local_dir, &cur_includes, &cur_excludes);
         if (section == .local_folder or section == .source) try pushLocalWorker(allocator, &local_copy_workers, &cur_dest_dir, &cur_sources);
 

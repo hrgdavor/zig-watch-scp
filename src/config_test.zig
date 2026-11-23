@@ -119,6 +119,137 @@ test "config: parse text_extensions, include, and exclude" {
     try std.testing.expectEqualStrings("/remote-file", cfg.folders[1].remote_dir);
 }
 
+fn baseConfig(allocator: std.mem.Allocator) !Config {
+    return Config{
+        .host = try allocator.dupe(u8, ""),
+        .username = try allocator.dupe(u8, ""),
+        .password = try allocator.dupe(u8, ""),
+        .key_path = try allocator.dupe(u8, ""),
+        .passphrase = try allocator.dupe(u8, ""),
+        .parallel_threads = 4,
+        .watch_delay_ms = 200,
+        .compress = false,
+        .simple_log = false,
+        .cleanup = false,
+        .dry_run = false,
+        .watch = false,
+        .verbose = false,
+        .color = false,
+        .file_mode = 0o644,
+        .dir_mode = 0o755,
+        .version_from = null,
+        .version_to = null,
+        .version_name = null,
+        .text_extensions = try allocator.alloc([]const u8, 0),
+        .folders = try allocator.alloc(config.Folder, 0),
+        .local_copy_workers = try allocator.alloc(config.LocalCopyWorkerConfig, 0),
+        .exec_cmd = null,
+        .create_folder = null,
+        .create_includes = try allocator.alloc([]const u8, 0),
+        .create_excludes = try allocator.alloc([]const u8, 0),
+        .get_file = null,
+        .put_file = null,
+    };
+}
+
+/// Parse `content` as a config file using an arena so the test does not have to
+/// mirror the parser's ownership rules.
+fn parseConfigFile(arena: std.mem.Allocator, io: std.Io, file_name: []const u8, content: []const u8) !Config {
+    const file = try std.Io.Dir.cwd().createFile(io, file_name, .{});
+    try file.writeStreamingAll(io, content);
+    file.close(io);
+    defer std.Io.Dir.cwd().deleteFile(io, file_name) catch {};
+
+    var cfg = try baseConfig(arena);
+    const cli_vars = std.StringHashMap([]const u8).init(arena);
+    try config.Config.parseIntoConfig(arena, io, std.testing.environ, cli_vars, &cfg, file_name);
+    return cfg;
+}
+
+test "config: each folder keeps its own scpdb" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cfg = try parseConfigFile(arena, std.testing.io, "test_multi_scpdb.conf",
+        \\[folder]
+        \\local_dir = ./one
+        \\remote_dir = /srv/one
+        \\scpdb = .scpdb.one
+        \\local_db = true
+        \\
+        \\[folder]
+        \\local_dir = ./two
+        \\remote_dir = /srv/two
+        \\
+        \\[file]
+        \\local_file = ./three.txt
+        \\remote_dir = /srv/three.txt
+        \\
+        \\[folder]
+        \\local_dir = ./four
+        \\remote_dir = /srv/four
+    );
+
+    try std.testing.expectEqual(@as(usize, 4), cfg.folders.len);
+    try std.testing.expectEqualStrings(".scpdb.one", cfg.folders[0].scpdb);
+    try std.testing.expect(cfg.folders[0].local_db);
+    // Folder 2 must not inherit folder 1's custom database.
+    try std.testing.expectEqualStrings(".scpdb", cfg.folders[1].scpdb);
+    try std.testing.expect(!cfg.folders[1].local_db);
+    // [file] sections are database-less; the following folder gets the default.
+    try std.testing.expect(cfg.folders[2].no_db);
+    try std.testing.expectEqualStrings(".scpdb", cfg.folders[3].scpdb);
+}
+
+test "config: incomplete [folder] section is reported" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectError(error.IncompleteFolderSection, parseConfigFile(arena, std.testing.io, "test_incomplete_folder.conf",
+        \\[folder]
+        \\local_dir = ./one
+        \\remote_dir = /srv/one
+        \\
+        \\[folder]
+        \\scpdb = .scpdb.two
+        \\local_db = true
+    ));
+}
+
+test "config: UTF-8 BOM does not hide the first folder" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cfg = try parseConfigFile(arena, std.testing.io, "test_bom.conf", "\xEF\xBB\xBFhost = 1.2.3.4\n" ++
+        "[folder]\nlocal_dir = ./src\nremote_dir = /srv/src\n");
+
+    try std.testing.expectEqual(@as(usize, 1), cfg.folders.len);
+    try std.testing.expectEqualStrings("./src", cfg.folders[0].local_dir);
+}
+
+test "config: global scpdb is ignored per folder" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cfg = try parseConfigFile(arena, std.testing.io, "test_global_scpdb.conf",
+        \\scpdb = D:/meta/global.scpdb
+        \\[folder]
+        \\local_dir = ./a
+        \\remote_dir = /srv/a
+        \\[folder]
+        \\local_dir = ./b
+        \\remote_dir = /srv/b
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), cfg.folders.len);
+    try std.testing.expectEqualStrings(".scpdb", cfg.folders[0].scpdb);
+    try std.testing.expectEqualStrings(".scpdb", cfg.folders[1].scpdb);
+}
+
 test "ssh_config: resolution" {
     const allocator = std.testing.allocator;
 
@@ -192,4 +323,3 @@ test "ssh_config: resolution" {
     try std.testing.expect(std.mem.indexOf(u8, cfg.key_path, "id_rsa_test") != null);
     try std.testing.expect(std.fs.path.isAbsolute(cfg.key_path));
 }
-
