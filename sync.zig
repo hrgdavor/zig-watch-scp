@@ -225,7 +225,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Perform initial sync with timing
         const t0 = std.Io.Timestamp.now(init.io, .boot);
-        if (try ssh_worker.performInitialSync(allocator, init.io, init.minimal.environ, &config, folder, &ssh, &remote_db, db_path, db_missing, printer)) {
+        if (try ssh_worker.performInitialSync(allocator, init.io, &config, folder, &ssh, &remote_db, db_path, db_missing, printer)) {
             any_changes = true;
         }
         const elapsed_ns = t0.durationTo(std.Io.Timestamp.now(init.io, .boot)).nanoseconds;

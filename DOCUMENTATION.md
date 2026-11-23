@@ -163,30 +163,30 @@ EOF
 
 ### Global Settings
 
-| Key                | Default       | Description                                     |
-| ------------------ | ------------- | ----------------------------------------------- |
-| `host`             | —             | Remote hostname or SSH config alias             |
-| `username`         | —             | SSH username                                    |
-| `password`         | —             | SSH password (prefer key auth or agent)         |
-| `key_path`         | —             | Path to SSH private key                         |
-| `passphrase`       | —             | Passphrase for private key                      |
-| `port`             | `22`          | SSH port                                        |
-| `parallel_threads` | `4`           | Upload threads for initial sync                 |
-| `watch_delay_ms`   | `200`         | Debounce delay for file-change events (ms)      |
-| `watch_backend`    | `nightwatch`  | `nightwatch` or `fsmeta` (reserved, see below)  |
-| `fsmeta_socket`    | —             | fs-meta Unix socket path (reserved backend)     |
-| `compress`         | `false`       | Enable SSH compression                          |
-| `cleanup`          | `false`       | Remove remote files missing locally             |
-| `dry_run`          | `false`       | Dry run mode (don't upload or delete)           |
-| `color`            | auto          | Force/disable ANSI color output                 |
-| `exec_cmd`         | —             | Remote command to run after each sync           |
-| `file_mode`        | `0644`        | SFTP permission mode for created files          |
-| `dir_mode`         | `0755`        | SFTP permission mode for created directories    |
-| `text_extensions`  | built-in list | Extensions treated as text (CRLF→LF normalised) |
-| `version_from`     | —             | Local version template file path                |
-| `version_to`       | —             | Remote path for processed version file          |
-| `version_name`     | —             | Project name injected into version file         |
-| `ENV.VARNAME`      | —             | Config-level default for `${VARNAME}` expansion |
+| Key                | Default       | Description                                              |
+| ------------------ | ------------- | -------------------------------------------------------- |
+| `host`             | —             | Remote hostname or SSH config alias                      |
+| `username`         | —             | SSH username                                             |
+| `password`         | —             | SSH password (prefer key auth or agent)                  |
+| `key_path`         | —             | Path to SSH private key                                  |
+| `passphrase`       | —             | Passphrase for private key                               |
+| `port`             | `22`          | SSH port                                                 |
+| `parallel_threads` | `4`           | Threads for scanning/hashing; SSH uploads are serialized |
+| `watch_delay_ms`   | `200`         | Debounce delay for file-change events (ms)               |
+| `watch_backend`    | `nightwatch`  | `nightwatch` or `fsmeta` (reserved, see below)           |
+| `fsmeta_socket`    | —             | fs-meta Unix socket path (reserved backend)              |
+| `compress`         | `false`       | Enable SSH compression                                   |
+| `cleanup`          | `false`       | Remove remote files missing locally                      |
+| `dry_run`          | `false`       | Dry run mode (don't upload or delete)                    |
+| `color`            | auto          | Force/disable ANSI color output                          |
+| `exec_cmd`         | —             | Remote command to run after each sync                    |
+| `file_mode`        | `0644`        | SFTP permission mode for created files                   |
+| `dir_mode`         | `0755`        | SFTP permission mode for created directories             |
+| `text_extensions`  | built-in list | Extensions treated as text (CRLF→LF normalised)          |
+| `version_from`     | —             | Local version template file path                         |
+| `version_to`       | —             | Remote path for processed version file                   |
+| `version_name`     | —             | Project name injected into version file                  |
+| `ENV.VARNAME`      | —             | Config-level default for `${VARNAME}` expansion          |
 
 ### Folder Settings
 
@@ -538,13 +538,19 @@ Supported in `includes` and `excludes`:
 
 1. **Initial Sync**:
    - Downloads `.scpdb` for each remote folder (if exists and `no_db=false`)
-   - Scans local directories in parallel
+   - Scans and hashes local directories in parallel
    - Detects changes using Wyhash64 or `mtime`+`size`
-   - Uploads only changed/new files
+   - Uploads only changed/new files, one file at a time. SSH transfers are
+     serialized because the bundled libssh2 crypto backend keeps process-wide
+     RNG state that every packet's padding draws from; parallel sessions race on
+     it and crash the process (`Illegal instruction`, heap corruption).
+     `parallel_threads` therefore parallelizes hashing, not transfers.
+   - A file only enters `.scpdb` after its upload completed and the SFTP handle
+     closed successfully, so an interrupted transfer is retried on the next run.
    - Checkpoints `.scpdb` every 5 seconds during large uploads, so a crash or
-     network failure only loses the files uploaded since the last checkpoint.
-     Database writes use a temp file plus rename, so an interrupted save cannot
-     truncate the previous good database.
+     network failure only loses the files uploaded since the last checkpoint;
+     the next run resumes from there. Database writes use a temp file plus
+     rename, so an interrupted save cannot truncate the previous good database.
    - Prunes `.scpdb`: removes entries for files no longer present locally
 
 2. **Initial Cleanup** (if `--cleanup`):

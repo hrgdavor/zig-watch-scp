@@ -13,6 +13,9 @@ pub const SshSession = struct {
     sftp: ?*c.LIBSSH2_SFTP,
     file_mode: u32,
     dir_mode: u32,
+    /// Directories already created on the remote host during this session, so
+    /// an upload of N files in one directory makes one mkdir chain, not N.
+    created_dirs: std.StringHashMap(void),
     pub const FileInfo = struct { size: u64, mtime: i64 }; // mtime in milliseconds since epoch
 
     pub fn libInit() !void {
@@ -147,6 +150,7 @@ pub const SshSession = struct {
                 .sftp = null,
                 .file_mode = file_mode,
                 .dir_mode = dir_mode,
+                .created_dirs = std.StringHashMap(void).init(allocator),
             };
         }
 
@@ -291,6 +295,7 @@ pub const SshSession = struct {
                     .sftp = null,
                     .file_mode = file_mode,
                     .dir_mode = dir_mode,
+                    .created_dirs = std.StringHashMap(void).init(allocator),
                 };
             }
 
@@ -323,6 +328,7 @@ pub const SshSession = struct {
                     .sftp = null,
                     .file_mode = file_mode,
                     .dir_mode = dir_mode,
+                    .created_dirs = std.StringHashMap(void).init(allocator),
                 };
             }
             printLastError(session, "Password authentication failed");
@@ -335,6 +341,9 @@ pub const SshSession = struct {
             _ = c.libssh2_sftp_shutdown(sftp);
             self.sftp = null;
         }
+        var dir_it = self.created_dirs.keyIterator();
+        while (dir_it.next()) |key| self.allocator.free(key.*);
+        self.created_dirs.deinit();
         _ = c.libssh2_session_disconnect(self.session, "Finished");
         _ = c.libssh2_session_free(self.session);
         closeSock(self.sock);
@@ -485,7 +494,10 @@ pub const SshSession = struct {
             }
             return error.RemoteFileOpenFailed;
         };
-        defer _ = c.libssh2_sftp_close(remote_file);
+        var closed = false;
+        defer {
+            if (!closed) _ = c.libssh2_sftp_close(remote_file);
+        }
 
         var chunk: [32768]u8 = undefined;
         var total_written: usize = 0;
@@ -524,6 +536,26 @@ pub const SshSession = struct {
         }
         if (size > 1024 * 1024 and !simple_log) {
             std.debug.print("\n", .{});
+        }
+
+        // The remote file is only complete once the handle is closed, and a
+        // file that shrank while it was read must not be reported as synced:
+        // the checksum database would then skip it on every later run.
+        closed = true;
+        const close_rc = c.libssh2_sftp_close(remote_file);
+        if (total_written != size) {
+            std.debug.print(
+                "Warning: {s} changed while it was uploaded ({} of {} bytes); it will be retried.\n",
+                .{ remote_path, total_written, size },
+            );
+            return error.UploadIncomplete;
+        }
+        if (close_rc != 0) {
+            std.debug.print(
+                "Warning: closing {s} failed (libssh2 error {}); it will be retried.\n",
+                .{ remote_path, close_rc },
+            );
+            return error.UploadCloseFailed;
         }
     }
 
@@ -677,6 +709,11 @@ pub const SshSession = struct {
         defer self.allocator.free(normalized);
         std.mem.replaceScalar(u8, normalized, '\\', '/');
 
+        // A sync uploads many files into the same directory. Remember the
+        // directories created in this session so each one is only walked once;
+        // without this every file costs one SFTP mkdir per path component.
+        if (self.created_dirs.contains(normalized)) return;
+
         var it = std.mem.splitScalar(u8, normalized, '/');
         var current_path = std.ArrayList(u8).empty;
         defer current_path.deinit(self.allocator);
@@ -707,6 +744,9 @@ pub const SshSession = struct {
                 @intCast(self.dir_mode),
             );
         }
+
+        const cached = try self.allocator.dupe(u8, normalized);
+        self.created_dirs.put(cached, {}) catch self.allocator.free(cached);
     }
 
     /// Execute a remote command and print its output
