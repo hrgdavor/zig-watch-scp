@@ -85,9 +85,9 @@ pub const Config = struct {
     get_file: ?[2][]const u8,
     put_file: ?[2][]const u8,
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // parseArgs  (native — no external dependency)
-    // ─────────────────────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // parseArgs  (native â€” no external dependency)
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Parse command-line arguments collected by the caller (skip argv[0]).
     /// Supports flags: -c/--config, -x/--compress, --simple-log, --cleanup,
@@ -120,7 +120,7 @@ pub const Config = struct {
         // --var VARNAME=value entries: highest priority in variable expansion
         var cli_vars = std.StringHashMap([]const u8).init(arena_allocator);
 
-        // ── subcommand / flag scanning ─────────────────────────────────────────
+        // â”€â”€ subcommand / flag scanning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Subcommands recognized: get, put, create.
         // Everything before the subcommand is a flag or positional.
         const Subcmd = enum { none, get, put, create };
@@ -137,7 +137,7 @@ pub const Config = struct {
         while (i < raw_args.len) : (i += 1) {
             const arg = raw_args[i];
 
-            // ── detect subcommand ─────────────────────────────────────────
+            // â”€â”€ detect subcommand â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             if (subcmd == .none and !std.mem.startsWith(u8, arg, "-")) {
                 if (std.mem.eql(u8, arg, "get")) {
                     subcmd = .get;
@@ -156,7 +156,7 @@ pub const Config = struct {
                 continue;
             }
 
-            // ── after subcommand: collect flags + positionals ──────────────
+            // â”€â”€ after subcommand: collect flags + positionals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             if (subcmd != .none) {
                 if (std.mem.eql(u8, arg, "--includes") or std.mem.eql(u8, arg, "--include")) {
                     i += 1;
@@ -177,7 +177,7 @@ pub const Config = struct {
                 // fall through to shared flag handling
             }
 
-            // ── shared flags ─────────────────────────────────────────────
+            // â”€â”€ shared flags â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
                 printHelp();
                 std.process.exit(0);
@@ -248,7 +248,7 @@ pub const Config = struct {
             }
         }
 
-        // ── resolve subcommand results ────────────────────────────────────────
+        // â”€â”€ resolve subcommand results â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         switch (subcmd) {
             .none => {
                 // Positional args: single = config path, three = host/user/pass
@@ -291,7 +291,7 @@ pub const Config = struct {
             },
         }
 
-        // ── validation ────────────────────────────────────────────────────────
+        // â”€â”€ validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if (config_path == null and create_folder == null and get_file == null and put_file == null and positionals.items.len == 0) {
             // Automatically look for sync.conf in the current directory if no config is provided
             if (std.Io.Dir.accessAbsolute(init.io, "sync.conf", .{})) |_| {
@@ -304,7 +304,7 @@ pub const Config = struct {
             return error.MissingArguments;
         }
 
-        // ── build Config ──────────────────────────────────────────────────────
+        // â”€â”€ build Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const stdout_file = std.Io.File.stdout();
         const resolved_color = if (cli_color) |cli_color_val| cli_color_val else std.Io.File.isTty(stdout_file, init.io) catch false;
         var config = Config{
@@ -338,12 +338,12 @@ pub const Config = struct {
             .put_file = if (put_file) |pf| .{ try path_util.expandHomeAndNormalize(arena_allocator, init.minimal.environ, pf[0]), try arena_allocator.dupe(u8, pf[1]) } else null,
         };
 
-        // Standalone create mode – no SSH config needed
+        // Standalone create mode â€“ no SSH config needed
         if (config_path == null and create_folder != null) {
             return config;
         }
 
-        // ── read config file ──────────────────────────────────────────────────
+        // â”€â”€ read config file â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if (config_path) |cp| {
             const expanded_cp = try path_util.expandHomeAndNormalize(arena_allocator, init.minimal.environ, cp);
             if (config.verbose) std.debug.print("Loading configuration from: {s}\n", .{expanded_cp});
@@ -355,7 +355,7 @@ pub const Config = struct {
         // Resolve SSH config before environment fallbacks and validation
         try resolveSshConfig(arena_allocator, init, &config);
 
-        // ── resolve credentials ───────────────────────────────────────────────
+        // â”€â”€ resolve credentials â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Secrets never travel through config variables. They come from a file
         // (safe to reference from a committed config), the environment, or the
         // positional argument. Highest priority first:
@@ -528,59 +528,24 @@ pub const Config = struct {
         return result;
     }
 
-    const VarSpec = struct {
-        name: []const u8,
-        default: ?[]const u8,
-    };
-
-    /// Explicit error set: `expandVars` and `appendVarDefault` are mutually
-    /// recursive, which Zig's inferred error sets cannot resolve.
-    const ExpandError = error{
-        OutOfMemory,
-        UndefinedConfigVariable,
-        EmptyConfigVariable,
-        InvalidVariableName,
-        UnclosedVariableBrace,
-    };
-
-    /// Split `${NAME}` / `${NAME:-default}` contents. The default part may itself
-    /// contain `${...}` placeholders and is expanded recursively when used.
-    fn splitVarSpec(inner: []const u8) VarSpec {
-        if (std.mem.indexOf(u8, inner, ":-")) |sep| {
-            return .{ .name = inner[0..sep], .default = inner[sep + 2 ..] };
-        }
-        return .{ .name = inner, .default = null };
-    }
-
-    fn appendVarDefault(
-        allocator: std.mem.Allocator,
-        result: *std.ArrayList(u8),
-        default_value: []const u8,
-        environ: std.process.Environ,
-        cli_vars: std.StringHashMap([]const u8),
-        env_defaults: *const std.StringHashMap([]const u8),
-    ) ExpandError!void {
-        const expanded = try expandVars(allocator, default_value, environ, cli_vars, env_defaults);
-        defer allocator.free(expanded);
-        try result.appendSlice(allocator, expanded);
-    }
-
-    /// Expand `${VARNAME}` and `${VARNAME:-default}` placeholders in a config
-    /// value. Any value in the file may use them.
+    /// Expand `${VARNAME}` placeholders in a config value. Any value in the file
+    /// may use them.
     ///
     /// Resolution order: `--var` CLI flag > real environment variable >
-    /// `ENV.VARNAME=` default in the config file > inline `:-` default.
-    /// A variable whose resolved value is empty counts as unset when a `:-`
-    /// default is present (shell semantics); without a default an empty value is
-    /// error.EmptyConfigVariable, and a completely unset name without a default
-    /// is error.UndefinedConfigVariable. Caller owns the returned slice.
+    /// `ENV.VARNAME=` default in the config file.
+    ///
+    /// A variable with no value is error.UndefinedConfigVariable; a variable
+    /// whose resolved value is empty is error.EmptyConfigVariable (silently
+    /// expanding to nothing produces broken paths such as ":/opt/app/src").
+    /// A literal empty value in the file is still allowed. Caller owns the
+    /// returned slice.
     fn expandVars(
         allocator: std.mem.Allocator,
         value: []const u8,
         environ: std.process.Environ,
         cli_vars: std.StringHashMap([]const u8),
         env_defaults: *const std.StringHashMap([]const u8),
-    ) ExpandError![]const u8 {
+    ) ![]const u8 {
         if (std.mem.indexOf(u8, value, "${") == null) {
             return allocator.dupe(u8, value);
         }
@@ -589,25 +554,24 @@ pub const Config = struct {
         var i: usize = 0;
         while (i < value.len) {
             if (i + 1 < value.len and value[i] == '$' and value[i + 1] == '{') {
-                // Find the matching brace, so `${A:-${B}}` nests correctly.
-                var depth: usize = 1;
-                var j = i + 2;
-                while (j < value.len) : (j += 1) {
-                    if (value[j] == '}') {
-                        depth -= 1;
-                        if (depth == 0) break;
-                    } else if (value[j] == '{' and value[j - 1] == '$') {
-                        depth += 1;
-                    }
-                }
-                if (depth != 0) {
+                const name_start = i + 2;
+                const close = std.mem.indexOfScalarPos(u8, value, name_start, '}') orelse {
                     std.debug.print("Config error: unclosed '${{' in value: {s}\n", .{value});
                     return error.UnclosedVariableBrace;
-                }
-
-                const spec = splitVarSpec(value[i + 2 .. j]);
-                if (spec.name.len == 0) {
+                };
+                const var_name = value[name_start..close];
+                if (var_name.len == 0) {
                     std.debug.print("Config error: empty variable name in '{s}'\n", .{value});
+                    return error.InvalidVariableName;
+                }
+                // Inline defaults are deliberately not supported: the committed
+                // default belongs in an ENV.NAME= line.
+                if (std.mem.indexOf(u8, var_name, ":-")) |sep| {
+                    std.debug.print(
+                        "Config error: '${{{s}}}' uses an inline default, which is not supported.\n" ++
+                            "  Declare the default once in the config: ENV.{s}=<value>\n",
+                        .{ var_name, var_name[0..sep] },
+                    );
                     return error.InvalidVariableName;
                 }
 
@@ -616,43 +580,36 @@ pub const Config = struct {
                     if (env_value) |owned| allocator.free(owned);
                 }
 
+                // Priority: 1. --var CLI flag  2. real env var  3. ENV.X= default
                 const found: ?[]const u8 = blk: {
-                    if (cli_vars.get(spec.name)) |v| break :blk v;
-                    if (environ.getAlloc(allocator, spec.name)) |v| {
+                    if (cli_vars.get(var_name)) |v| break :blk v;
+                    if (environ.getAlloc(allocator, var_name)) |v| {
                         env_value = v;
                         break :blk v;
                     } else |_| {}
-                    break :blk env_defaults.get(spec.name);
+                    break :blk env_defaults.get(var_name);
                 };
 
                 if (found) |v| {
                     if (v.len > 0) {
                         try result.appendSlice(allocator, v);
-                    } else if (spec.default) |default_value| {
-                        try appendVarDefault(allocator, &result, default_value, environ, cli_vars, env_defaults);
                     } else {
-                        // An empty value would silently produce broken paths such
-                        // as ":/opt/app/src". A literal empty value in the file is
-                        // still allowed; only an empty *variable* is an error.
                         std.debug.print(
-                            "Config error: variable '${{{s}}}' is empty and has no inline default.\n" ++
-                                "  Set it to a value, or write ${{{s}:-default}} to allow an empty/absent value.\n",
-                            .{ spec.name, spec.name },
+                            "Config error: variable '${{{s}}}' is empty.\n" ++
+                                "  Give it a value (--var {s}=value, env var {s}, or ENV.{s}= in the config).\n",
+                            .{ var_name, var_name, var_name, var_name },
                         );
                         return error.EmptyConfigVariable;
                     }
-                } else if (spec.default) |default_value| {
-                    try appendVarDefault(allocator, &result, default_value, environ, cli_vars, env_defaults);
                 } else {
                     std.debug.print(
                         "Config error: variable '${{{s}}}' is not defined.\n" ++
-                            "  Set it via: --var {s}=value  |  env var {s}  |  ENV.{s}= in config\n" ++
-                            "  Or give it an inline fallback in the config: ${{{s}:-default}}\n",
-                        .{ spec.name, spec.name, spec.name, spec.name, spec.name },
+                            "  Set it via: --var {s}=value  |  env var {s}  |  ENV.{s}= in config\n",
+                        .{ var_name, var_name, var_name, var_name },
                     );
                     return error.UndefinedConfigVariable;
                 }
-                i = j + 1;
+                i = close + 1;
             } else {
                 try result.append(allocator, value[i]);
                 i += 1;

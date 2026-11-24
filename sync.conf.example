@@ -44,15 +44,15 @@ cleanup=false
 # no_db=false
 
 # === Variables in values (reusable, checked-in config) ===
-# Any value may use ${NAME} or ${NAME:-default}. Commit shared defaults with
-# ENV.NAME=..., then each developer supplies their own root from the environment
-# or with `--var REMOTE_ROOT=...` — without editing this file:
+# Any value may use ${NAME}; declare the shared default with ENV.NAME=...
+# and let each developer override it from the environment or with
+# `--var REMOTE_ROOT=...` — without editing this file:
 #   ENV.DEV_HOST=dev.example.com
 #   ENV.REMOTE_ROOT=/opt/project
 #   host=${DEV_HOST}
 #   [folder]
 #   local_dir=./src
-#   remote_dir=${REMOTE_ROOT:-/opt/project}/src
+#   remote_dir=${REMOTE_ROOT}/src
 
 # === Folder Synchronization Pairs ===
 # You must define one or more folder sections. Each section starts with [folder].
