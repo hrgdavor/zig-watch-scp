@@ -17,7 +17,7 @@
   - [Standalone Get/Put](#standalone-getput)
   - [Advanced Database Configuration](#advanced-database-configuration)
   - [Key-based Authentication](#key-based-authentication)
-  - [Credentials via Environment Variables](#credentials-via-environment-variables)
+  - [Passwords and Passphrases](#passwords-and-passphrases)
   - [SSH Config Support](#ssh-config-support)
   - [Using with KeePassXC (SSH Agent)](#using-with-keepassxc-ssh-agent)
   - [Color Output Behavior](#color-output-behavior)
@@ -167,9 +167,11 @@ EOF
 | ------------------ | ------------- | -------------------------------------------------------- |
 | `host`             | —             | Remote hostname or SSH config alias                      |
 | `username`         | —             | SSH username                                             |
-| `password`         | —             | SSH password (prefer key auth or agent)                  |
+| `password`         | —             | SSH password (deprecated; use `password_file`)           |
+| `password_file`    | —             | File holding the SSH password (one line)                 |
 | `key_path`         | —             | Path to SSH private key                                  |
-| `passphrase`       | —             | Passphrase for private key                               |
+| `passphrase`       | —             | Key passphrase (deprecated; use `passphrase_file`)       |
+| `passphrase_file`  | —             | File holding the key passphrase (one line)               |
 | `port`             | `22`          | SSH port                                                 |
 | `parallel_threads` | `4`           | Threads for hashing and parallel uploads                 |
 | `watch_delay_ms`   | `200`         | Debounce delay for file-change events (ms)               |
@@ -298,6 +300,12 @@ anything.
 error rather than a silently broken path; a literal empty value in the file
 (such as `password=`) is still allowed.
 
+**Secrets and `--var`:** `--var` rejects names containing `PASSWORD` or
+`PASSPHRASE`, because the value would be visible in shell history and process
+listings. Environment variables are still allowed. For passwords and
+passphrases, use a secret file or an SSH agent — see
+[Passwords and Passphrases](#passwords-and-passphrases).
+
 **Why this order?**
 
 - **`--var` is highest**: most explicit — typed on *this specific invocation*. It is also the only override that doesn't touch the shell environment, so one run cannot leak into the next.
@@ -370,7 +378,7 @@ sync --var REMOTE_ROOT=D:\srv\app -c sync.conf
 
 Nothing personal needs to be committed: the config holds shared defaults, and
 each developer's root comes from the environment or `--var`. Credentials follow
-the same rule — see [Credentials via Environment Variables](#credentials-via-environment-variables).
+the same rule — see [Passwords and Passphrases](#passwords-and-passphrases).
 
 **Error when a variable has neither a value nor a default:**
 
@@ -419,20 +427,108 @@ Benefits:
 
 ### Key-based Authentication
 
-Add `key_path` to `sync.conf`. If the key is encrypted, add `passphrase` as well, or use an SSH agent.
+Add `key_path` to `sync.conf`. If the key is encrypted, add `passphrase_file=`
+(a one-line secret file) or let an SSH agent hold the decrypted key — see
+[Passwords and Passphrases](#passwords-and-passphrases).
 
-### Credentials via Environment Variables
+### Passwords and Passphrases
 
-Keep secrets out of a committed config:
+The short version: prefer an SSH key + agent. If a password is unavoidable, point
+the config at a per-user **secret file**; environment variables are a fallback for
+CI. Secrets are never accepted through `--var`.
 
-- `SCP_PASSWORD` — SSH password fallback
-- `SCP_PASSPHRASE` — Key passphrase fallback
+#### Preferred: no stored secret
 
-Both are read only when the config has no `password` / `passphrase` value, and
-before any prompting. The same variables can be set per developer in their shell
-profile or CI secrets, while the committed config stays credential-free. For
-key-based logins, prefer an SSH agent (or `~/.ssh/config` `IdentityFile`) over a
-password.
+Use a key with `ssh-agent` (or `IdentityFile` in `~/.ssh/config`). The agent holds
+the decrypted key for the session, so nothing password-like is stored by this tool:
+
+```sh
+ssh-add ~/.ssh/id_ed25519        # once per login/session
+sync -c sync.conf
+```
+
+#### Password from a file (recommended for unattended runs)
+
+`password_file=` is a *path*, not a secret, so it is safe to commit:
+
+```ini
+password_file=~/.config/zig-watch-scp/dev.password
+```
+
+Create the file once. The password is typed a single time, never per run, and
+never appears in shell history or the process list:
+
+```sh
+# Linux/macOS
+mkdir -p ~/.config/zig-watch-scp && chmod 700 ~/.config/zig-watch-scp
+read -rsp 'Password for dev: ' P; printf '%s' "$P" > ~/.config/zig-watch-scp/dev.password; unset P
+chmod 600 ~/.config/zig-watch-scp/dev.password
+```
+
+```powershell
+# Windows PowerShell
+$dir = "$env:USERPROFILE\.config\zig-watch-scp"
+New-Item -ItemType Directory -Force $dir | Out-Null
+$secure = Read-Host -AsSecureString 'Password for dev'
+$plain = [System.Net.NetworkCredential]::new('', $secure).Password
+[System.IO.File]::WriteAllText("$dir\dev.password", $plain)
+icacls "$dir\dev.password" /inheritance:r /grant:r "$($env:USERDOMAIN)\$($env:USERNAME):(R)"
+```
+
+The same mechanism protects an encrypted key's passphrase with
+`passphrase_file=`.
+
+#### Password sources and precedence
+
+For both the password and the passphrase, the first available source wins:
+
+| Priority | Source                                 | Example                                  |
+| -------- | -------------------------------------- | ---------------------------------------- |
+| 1        | `--password-file <path>`               | `sync --password-file ./dev.pass -c ...` |
+| 2        | positional password                    | `sync host user 'secret' -c sync.conf`   |
+| 3        | `SCP_PASSWORD_FILE` (a path)           | `SCP_PASSWORD_FILE=/run/secrets/pw sync` |
+| 4        | `SCP_PASSWORD` (the value)             | `SCP_PASSWORD='secret' sync -c ...`      |
+| 5        | `password_file=` in the config         | `password_file=~/.config/...`            |
+| 6        | `password=` in the config (deprecated) | warns on every run                       |
+
+The passphrase uses the matching names: `--passphrase-file`,
+`SCP_PASSPHRASE_FILE`, `SCP_PASSPHRASE`, `passphrase_file=`, `passphrase=`.
+
+#### Why `--var` may not carry a password
+
+`--var MY_PASSWORD=...` is **rejected**:
+
+```
+Config error: --var MY_PASSWORD=... is not allowed: names containing PASSWORD or PASSPHRASE may not be passed on the command line.
+```
+
+`--var` values are visible in shell history and in the process listing (`ps`,
+Task Manager), so any local user or process can read them. Names containing
+PASSWORD or PASSPHRASE are therefore refused for `--var` (and `-D`).
+
+Environment-provided variables are still allowed, because they are the normal
+place for a shell profile or CI secret. They are, however, inherited by child
+processes, which is why the file is preferred over `SCP_PASSWORD` for unattended
+runs.
+
+#### File rules
+
+- One line; a single trailing newline (LF or CRLF) is ignored.
+- Empty files and files with more than one line are rejected.
+- The file must be readable only by you. On POSIX a group/world-readable file
+  prints a warning with the `chmod 600` command to run; on Windows use `icacls`.
+- Keep it out of the repository and off network shares.
+
+#### CI
+
+Mount the secret as a file and point `SCP_PASSWORD_FILE` at it:
+
+```sh
+SCP_PASSWORD_FILE=/run/secrets/sync_password sync -c sync.conf
+```
+
+`SCP_PASSWORD` works too, but CI systems often expose environment variables to
+child processes and logs, so the file is safer.
 
 ### SSH Config Support
 

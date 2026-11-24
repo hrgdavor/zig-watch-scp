@@ -4,6 +4,12 @@ username=user
 
 # SSH password (optional if key_path is used)
 # password=secret
+# Safer: keep the secret in a one-line file and commit only its path.
+# The file must be readable only by you (chmod 600 / icacls).
+# password_file=~/.config/zig-watch-scp/dev.password
+# passphrase_file=~/.config/zig-watch-scp/dev.passphrase
+# Variables may not carry secrets through --var; environment variables
+# (SCP_PASSWORD / SCP_PASSWORD_FILE) and these files are the supported channels.
 
 # SSH private key path (optional, overrides password auth if provided)
 key_path=~/.ssh/id_rsa

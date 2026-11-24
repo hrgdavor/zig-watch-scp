@@ -304,6 +304,117 @@ test "config: variables expand in global values and a lone '$' survives" {
     try std.testing.expectEqualStrings("/opt/a$b", cfg.folders[0].remote_dir);
 }
 
+test "config: --var rejects names containing PASSWORD or PASSPHRASE" {
+    try std.testing.expectError(error.ForbiddenVariableName, config.Config.validateVarName("MY_PASSWORD"));
+    try std.testing.expectError(error.ForbiddenVariableName, config.Config.validateVarName("my_password"));
+    try std.testing.expectError(error.ForbiddenVariableName, config.Config.validateVarName("PASSWORD_FILE"));
+    try std.testing.expectError(error.ForbiddenVariableName, config.Config.validateVarName("KEY_PASSPHRASE"));
+    // Environment variables are still allowed; only --var is restricted.
+    try config.Config.validateVarName("REMOTE_ROOT");
+    try config.Config.validateVarName("DEV_HOST");
+}
+
+test "config: secret files are read as a single line" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    try std.Io.Dir.cwd().createDirPath(io, "test_secrets");
+    defer std.Io.Dir.cwd().deleteTree(io, "test_secrets") catch {};
+
+    const Fixture = struct { name: []const u8, content: []const u8, expected: []const u8 };
+    const fixtures = [_]Fixture{
+        .{ .name = "test_secrets/plain", .content = "s3cret", .expected = "s3cret" },
+        .{ .name = "test_secrets/lf", .content = "s3cret\n", .expected = "s3cret" },
+        .{ .name = "test_secrets/crlf", .content = "s3cret\r\n", .expected = "s3cret" },
+        .{ .name = "test_secrets/spaces", .content = "  two words  \n", .expected = "  two words  " },
+    };
+    for (fixtures) |fixture| {
+        const file = try std.Io.Dir.cwd().createFile(io, fixture.name, .{});
+        try file.writeStreamingAll(io, fixture.content);
+        file.close(io);
+
+        const secret = try config.Config.readSecretFile(allocator, io, std.testing.environ, fixture.name, "password");
+        defer allocator.free(secret);
+        try std.testing.expectEqualStrings(fixture.expected, secret);
+    }
+}
+
+test "config: invalid secret files are rejected" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    try std.Io.Dir.cwd().createDirPath(io, "test_secrets_bad");
+    defer std.Io.Dir.cwd().deleteTree(io, "test_secrets_bad") catch {};
+
+    const empty_file = try std.Io.Dir.cwd().createFile(io, "test_secrets_bad/empty", .{});
+    empty_file.close(io);
+
+    const multi_file = try std.Io.Dir.cwd().createFile(io, "test_secrets_bad/multi", .{});
+    try multi_file.writeStreamingAll(io, "one\ntwo\n");
+    multi_file.close(io);
+
+    try std.testing.expectError(error.SecretFileInvalid, config.Config.readSecretFile(allocator, io, std.testing.environ, "test_secrets_bad/empty", "password"));
+    try std.testing.expectError(error.SecretFileInvalid, config.Config.readSecretFile(allocator, io, std.testing.environ, "test_secrets_bad/multi", "password"));
+    try std.testing.expectError(error.SecretFileUnreadable, config.Config.readSecretFile(allocator, io, std.testing.environ, "test_secrets_bad/missing", "password"));
+}
+
+test "config: password source precedence" {
+    const io = std.testing.io;
+    // resolveSecret may return a borrowed slice (environment/config value) or a
+    // freshly allocated one (secret file), so the test owns an arena instead of
+    // freeing individual results.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    try std.Io.Dir.cwd().createDirPath(io, "test_secret_prec");
+    defer std.Io.Dir.cwd().deleteTree(io, "test_secret_prec") catch {};
+
+    const file = try std.Io.Dir.cwd().createFile(io, "test_secret_prec/secret", .{});
+    try file.writeStreamingAll(io, "from-file\n");
+    file.close(io);
+
+    const none = config.Config.SecretSource{
+        .cli_file = null,
+        .cli_value = null,
+        .env_file_name = "SYNC_TEST_NO_SUCH_FILE_VAR",
+        .env_value_name = "SYNC_TEST_NO_SUCH_VALUE_VAR",
+        .config_file = null,
+        .config_value = "from-config",
+        .what = "password",
+    };
+
+    try std.testing.expectEqualStrings("from-config", try config.Config.resolveSecret(allocator, io, std.testing.environ, none));
+
+    var with_file = none;
+    with_file.config_file = "test_secret_prec/secret";
+    try std.testing.expectEqualStrings("from-file", try config.Config.resolveSecret(allocator, io, std.testing.environ, with_file));
+
+    var with_cli = with_file;
+    with_cli.cli_value = "from-cli";
+    try std.testing.expectEqualStrings("from-cli", try config.Config.resolveSecret(allocator, io, std.testing.environ, with_cli));
+
+    with_cli.cli_file = "test_secret_prec/secret";
+    try std.testing.expectEqualStrings("from-file", try config.Config.resolveSecret(allocator, io, std.testing.environ, with_cli));
+}
+
+test "config: password_file and passphrase_file are parsed" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cfg = try parseConfigFile(arena, std.testing.io, "test_secret_paths.conf",
+        \\password_file = /run/secrets/sync_password
+        \\passphrase_file = /run/secrets/sync_passphrase
+        \\[folder]
+        \\local_dir = ./src
+        \\remote_dir = /srv/src
+    );
+
+    try std.testing.expectEqualStrings("/run/secrets/sync_password", cfg.password_file.?);
+    try std.testing.expectEqualStrings("/run/secrets/sync_passphrase", cfg.passphrase_file.?);
+}
+
 test "config: each folder keeps its own scpdb" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-GPL-3.0-with-Commons-Clause
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
+const builtin = @import("builtin");
 const app_version = @import("app_version.zig");
 const path_util = @import("path_util.zig");
 
@@ -67,6 +68,14 @@ pub const Config = struct {
     watch_backend: WatchBackend = .nightwatch,
     fsmeta_socket: ?[]const u8 = null,
 
+    /// Paths to files holding the secret, so a committed config never contains
+    /// the secret itself. A path is not sensitive; the file is (see
+    /// `readSecretFile`). Resolved with the precedence documented in
+    /// DOCUMENTATION.md: --password-file, SCP_PASSWORD_FILE, SCP_PASSWORD,
+    /// password_file, password.
+    password_file: ?[]const u8 = null,
+    passphrase_file: ?[]const u8 = null,
+
     // Standalone create mode
     create_folder: ?[]const u8,
     create_includes: []const []const u8,
@@ -104,6 +113,8 @@ pub const Config = struct {
         var cli_host: ?[]const u8 = null;
         var cli_username: ?[]const u8 = null;
         var cli_password: ?[]const u8 = null;
+        var cli_password_file: ?[]const u8 = null;
+        var cli_passphrase_file: ?[]const u8 = null;
         var cli_check: ?CheckMode = null;
         var cli_no_db: bool = false;
         // --var VARNAME=value entries: highest priority in variable expansion
@@ -208,6 +219,14 @@ pub const Config = struct {
                 }
             } else if (std.mem.eql(u8, arg, "--no-db")) {
                 cli_no_db = true;
+            } else if (std.mem.eql(u8, arg, "--password-file")) {
+                i += 1;
+                if (i >= raw_args.len) return error.MissingArgValue;
+                cli_password_file = raw_args[i];
+            } else if (std.mem.eql(u8, arg, "--passphrase-file")) {
+                i += 1;
+                if (i >= raw_args.len) return error.MissingArgValue;
+                cli_passphrase_file = raw_args[i];
             } else if (std.mem.eql(u8, arg, "--var") or std.mem.eql(u8, arg, "-D")) {
                 i += 1;
                 if (i >= raw_args.len) return error.MissingArgValue;
@@ -217,6 +236,7 @@ pub const Config = struct {
                     return error.InvalidArgFormat;
                 };
                 const vname = pair[0..eq];
+                try validateVarName(vname);
                 const vval = pair[eq + 1 ..];
                 try cli_vars.put(
                     try arena_allocator.dupe(u8, vname),
@@ -335,17 +355,30 @@ pub const Config = struct {
         // Resolve SSH config before environment fallbacks and validation
         try resolveSshConfig(arena_allocator, init, &config);
 
-        // Environment variable fallbacks for credentials
-        if (config.password.len == 0) {
-            if (init.minimal.environ.getAlloc(arena_allocator, "SCP_PASSWORD")) |val| {
-                config.password = val;
-            } else |_| {}
-        }
-        if (config.passphrase.len == 0) {
-            if (init.minimal.environ.getAlloc(arena_allocator, "SCP_PASSPHRASE")) |val| {
-                config.passphrase = val;
-            } else |_| {}
-        }
+        // ── resolve credentials ───────────────────────────────────────────────
+        // Secrets never travel through config variables. They come from a file
+        // (safe to reference from a committed config), the environment, or the
+        // positional argument. Highest priority first:
+        //   --password-file > positional password > SCP_PASSWORD_FILE >
+        //   SCP_PASSWORD > password_file (config) > password (config literal)
+        config.password = try resolveSecret(arena_allocator, init.io, init.minimal.environ, .{
+            .cli_file = cli_password_file,
+            .cli_value = cli_password,
+            .env_file_name = "SCP_PASSWORD_FILE",
+            .env_value_name = "SCP_PASSWORD",
+            .config_file = config.password_file,
+            .config_value = config.password,
+            .what = "password",
+        });
+        config.passphrase = try resolveSecret(arena_allocator, init.io, init.minimal.environ, .{
+            .cli_file = cli_passphrase_file,
+            .cli_value = null,
+            .env_file_name = "SCP_PASSPHRASE_FILE",
+            .env_value_name = "SCP_PASSPHRASE",
+            .config_file = config.passphrase_file,
+            .config_value = config.passphrase,
+            .what = "passphrase",
+        });
 
         if (config.host.len == 0 and config.local_copy_workers.len == 0) return error.MissingHost;
         if (config.username.len == 0 and config.local_copy_workers.len == 0) return error.MissingUsername;
@@ -377,6 +410,8 @@ pub const Config = struct {
             \\      --watch-delay <ms>    Delay before syncing after change (default: 200)
             \\      --exec <cmd>          Remote command to run after sync
             \\      --var NAME=value      Define ${{NAME}} for this run (repeatable)
+            \\      --password-file <f>   Read the SSH password from a file (one line)
+            \\      --passphrase-file <f> Read the key passphrase from a file (one line)
             \\  -w, --watch               Enable watch mode (continuous sync)
             \\      --no-color            Disable color output
             \\  -h, --help               Show this help
@@ -624,6 +659,127 @@ pub const Config = struct {
             }
         }
         return result.toOwnedSlice(allocator);
+    }
+
+    /// Names that may not be passed through `--var`: the value would appear in
+    /// shell history and in the process listing (`ps`, Task Manager), where any
+    /// local process can read it. Environment variables and `password_file` are
+    /// the supported secret channels instead.
+    pub fn isForbiddenSecretVarName(name: []const u8) bool {
+        for ([_][]const u8{ "PASSWORD", "PASSPHRASE" }) |needle| {
+            if (indexOfIgnoreCase(name, needle) != null) return true;
+        }
+        return false;
+    }
+
+    /// Enforce the `--var` restriction. Split out so it can be tested without
+    /// constructing a `std.process.Init`.
+    pub fn validateVarName(name: []const u8) !void {
+        if (!isForbiddenSecretVarName(name)) return;
+        std.debug.print(
+            "Config error: --var {s}=... is not allowed: names containing PASSWORD or PASSPHRASE may not be passed on the command line.\n" ++
+                "  --var values are visible in shell history and process listings.\n" ++
+                "  Use the environment (SCP_PASSWORD / SCP_PASSWORD_FILE), password_file= in the config,\n" ++
+                "  --password-file <file>, or SSH key/agent auth.\n",
+            .{name},
+        );
+        return error.ForbiddenVariableName;
+    }
+
+    fn indexOfIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
+        if (needle.len == 0 or haystack.len < needle.len) return null;
+        var i: usize = 0;
+        while (i + needle.len <= haystack.len) : (i += 1) {
+            if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return i;
+        }
+        return null;
+    }
+
+    pub const SecretSource = struct {
+        /// `--password-file` / `--passphrase-file`.
+        cli_file: ?[]const u8,
+        /// Positional password argument (`sync host user password`).
+        cli_value: ?[]const u8,
+        env_file_name: []const u8,
+        env_value_name: []const u8,
+        /// `password_file=` / `passphrase_file=` in the config.
+        config_file: ?[]const u8,
+        /// `password=` / `passphrase=` in the config (deprecated, warns).
+        config_value: []const u8,
+        /// "password" or "passphrase", for messages.
+        what: []const u8,
+    };
+
+    /// Pick the secret with the documented precedence. An unreadable or invalid
+    /// secret file is a hard error: silently continuing would authenticate with
+    /// no secret and produce a confusing failure later.
+    pub fn resolveSecret(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        environ: std.process.Environ,
+        src: SecretSource,
+    ) ![]const u8 {
+        if (src.cli_file) |path| return readSecretFile(allocator, io, environ, path, src.what);
+        if (src.cli_value) |value| return value;
+        if (environ.getAlloc(allocator, src.env_file_name)) |path| {
+            return readSecretFile(allocator, io, environ, path, src.what);
+        } else |_| {}
+        if (environ.getAlloc(allocator, src.env_value_name)) |value| {
+            return value;
+        } else |_| {}
+        if (src.config_file) |path| return readSecretFile(allocator, io, environ, path, src.what);
+        return src.config_value;
+    }
+
+    /// Read a single-line secret from a file. A trailing newline (LF or CRLF) is
+    /// ignored; empty files, additional lines and unreadable paths are errors.
+    /// On POSIX, a group/world-readable file produces a warning.
+    pub fn readSecretFile(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        environ: std.process.Environ,
+        path: []const u8,
+        what: []const u8,
+    ) ![]const u8 {
+        const expanded = try path_util.expandHomeAndNormalize(allocator, environ, path);
+        defer allocator.free(expanded);
+
+        if (comptime builtin.os.tag != .windows) {
+            if (std.Io.Dir.cwd().statFile(io, expanded, .{})) |stat| {
+                const mode = @backingInt(stat.permissions);
+                if (mode & 0o077 != 0) {
+                    std.debug.print(
+                        "Warning: {s} file '{s}' is accessible by other users (mode {o}); run: chmod 600 '{s}'\n",
+                        .{ what, expanded, mode & 0o777, expanded },
+                    );
+                }
+            } else |_| {}
+        }
+
+        const content = std.Io.Dir.cwd().readFileAlloc(io, expanded, allocator, std.Io.Limit.limited(64 * 1024)) catch |err| {
+            std.debug.print(
+                "Config error: cannot read {s} file '{s}' ({s}).\n" ++
+                    "  Create it with one line containing the secret, readable only by you.\n",
+                .{ what, expanded, @errorName(err) },
+            );
+            return error.SecretFileUnreadable;
+        };
+        defer allocator.free(content);
+
+        var end = content.len;
+        if (end > 0 and content[end - 1] == '\n') end -= 1;
+        if (end > 0 and content[end - 1] == '\r') end -= 1;
+        const secret = content[0..end];
+
+        if (std.mem.indexOfAny(u8, secret, "\r\n") != null) {
+            std.debug.print("Config error: {s} file '{s}' must contain a single line.\n", .{ what, expanded });
+            return error.SecretFileInvalid;
+        }
+        if (secret.len == 0) {
+            std.debug.print("Config error: {s} file '{s}' is empty.\n", .{ what, expanded });
+            return error.SecretFileInvalid;
+        }
+        return try allocator.dupe(u8, secret);
     }
 
     pub fn parseIntoConfig(
@@ -916,11 +1072,29 @@ pub const Config = struct {
                     if (config.verbose) std.debug.print("  Loaded username: {s}\n", .{config.username});
                 } else if (std.mem.eql(u8, key, "password") and config.password.len == 0) {
                     config.password = try allocator.dupe(u8, value);
+                    if (value.len > 0) {
+                        std.debug.print(
+                            "Warning: 'password' in the config file stores a secret in the file.\n" ++
+                                "  Prefer password_file= <path>, SCP_PASSWORD_FILE, or key/agent auth.\n",
+                            .{},
+                        );
+                    }
+                } else if (std.mem.eql(u8, key, "password_file")) {
+                    config.password_file = try path_util.expandHomeAndNormalize(allocator, environ, value);
                 } else if ((std.mem.eql(u8, key, "key_path") or std.mem.eql(u8, key, "key")) and config.key_path.len == 0) {
                     config.key_path = try path_util.expandHomeAndNormalize(allocator, environ, value);
                     if (config.verbose) std.debug.print("  Loaded key_path: {s}\n", .{config.key_path});
                 } else if (std.mem.eql(u8, key, "passphrase") and config.passphrase.len == 0) {
                     config.passphrase = try allocator.dupe(u8, value);
+                    if (value.len > 0) {
+                        std.debug.print(
+                            "Warning: 'passphrase' in the config file stores a secret in the file.\n" ++
+                                "  Prefer passphrase_file= <path>, SCP_PASSPHRASE_FILE, or an SSH agent.\n",
+                            .{},
+                        );
+                    }
+                } else if (std.mem.eql(u8, key, "passphrase_file")) {
+                    config.passphrase_file = try path_util.expandHomeAndNormalize(allocator, environ, value);
                 } else if (std.mem.eql(u8, key, "parallel_threads")) {
                     config.parallel_threads = try std.fmt.parseInt(usize, value, 10);
                 } else if (std.mem.eql(u8, key, "watch_delay_ms")) {

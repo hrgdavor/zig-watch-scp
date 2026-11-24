@@ -46,6 +46,9 @@ pub fn main(init: std.process.Init) !void {
             error.EmptyConfigVariable,
             error.InvalidVariableName,
             error.UnclosedVariableBrace,
+            error.ForbiddenVariableName,
+            error.SecretFileUnreadable,
+            error.SecretFileInvalid,
             => std.process.exit(1),
             else => {},
         }
