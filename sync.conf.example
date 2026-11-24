@@ -13,7 +13,7 @@ username=user
 # For CI, mount a secret file and set SCP_PASSWORD_FILE instead of committing it.
 # Avoid a plaintext password file in your home directory; if one is unavoidable,
 # use chmod 600 / icacls and prefer password_file= over password= in the config.
-# Variables may not carry secrets through --var.
+# Variables may not carry secrets through --var. Setup recipes: SECURE-AUTH.md
 
 # SSH private key path (optional, overrides password auth if provided)
 key_path=~/.ssh/id_rsa

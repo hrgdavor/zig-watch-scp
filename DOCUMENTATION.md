@@ -17,7 +17,7 @@
   - [Standalone Get/Put](#standalone-getput)
   - [Advanced Database Configuration](#advanced-database-configuration)
   - [Key-based Authentication](#key-based-authentication)
-  - [Passwords and Passphrases](#passwords-and-passphrases)
+  - [Secure Authentication Setup](SECURE-AUTH.md)
   - [SSH Config Support](#ssh-config-support)
   - [Using with KeePassXC (SSH Agent)](#using-with-keepassxc-ssh-agent)
   - [Color Output Behavior](#color-output-behavior)
@@ -301,7 +301,7 @@ the file (such as `password=`) is still allowed.
 `PASSPHRASE`, because the value would be visible in shell history and process
 listings. Environment variables are still allowed. For passwords and
 passphrases, use a secret file or an SSH agent — see
-[Passwords and Passphrases](#passwords-and-passphrases).
+[Secure Authentication Setup](SECURE-AUTH.md).
 
 **Why this order?**
 
@@ -373,7 +373,7 @@ sync --var REMOTE_ROOT=D:\srv\app -c sync.conf
 
 Nothing personal needs to be committed: the config holds shared `ENV.` defaults,
 and each developer's root comes from the environment or `--var`. Credentials
-follow the same rule — see [Passwords and Passphrases](#passwords-and-passphrases).
+follow the same rule — see [Secure Authentication Setup](SECURE-AUTH.md).
 
 **Errors:**
 
@@ -428,123 +428,19 @@ Benefits:
 
 Add `key_path` to `sync.conf`. If the key is encrypted, let an SSH agent hold the
 decrypted key, or use `passphrase_command=` (a keychain/vault command) — see
-[Passwords and Passphrases](#passwords-and-passphrases).
+[Secure Authentication Setup](SECURE-AUTH.md).
 
 ### Passwords and Passphrases
 
-Prefer no secret at all. If a password is unavoidable, read it from the OS
-credential store with `password_command`; avoid a plaintext file in your home
-directory, because agents and malware scan exactly those paths for secrets.
-Secrets are never accepted through `--var`.
+Secrets never travel through `--var`. For both the password and the passphrase,
+the first available source wins: `--password-file`, `--password-command`, the
+positional password, `SCP_PASSWORD_FILE`, `SCP_PASSWORD_COMMAND`,
+`SCP_PASSWORD`, `password_command=`, `password_file=`, then `password=`
+(deprecated).
 
-#### Preferred: no stored secret
-
-Use a key with `ssh-agent` (or `IdentityFile` in `~/.ssh/config`). The agent holds
-the decrypted key for the session and never hands it to this process:
-
-```sh
-ssh-add ~/.ssh/id_ed25519        # once per login/session
-sync -c sync.conf
-```
-
-#### Password from a credential store (recommended)
-
-`password_command=` runs a command and takes the first line of its stdout as the
-secret. The secret lives in the OS keychain, KeePassXC, 1Password, `pass` or a
-vault — never in the config, the environment, or a scan-friendly file:
-
-| Store                  | One-time setup                                                                    | `password_command=`                                      |
-| ---------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| macOS Keychain         | `security add-generic-password -s zig-watch-scp-dev -a "$USER" -w`                | `security find-generic-password -s zig-watch-scp-dev -w` |
-| Linux Secret Service   | `secret-tool store --label='zig-watch-scp dev' service zig-watch-scp host dev`    | `secret-tool lookup service zig-watch-scp host dev`      |
-| Windows DPAPI          | PowerShell snippet below                                                          | PowerShell one-liner below                               |
-| 1Password              | sign in once (`op signin`)                                                        | `op read op://Private/zig-watch-scp/password`            |
-| pass                   | `pass insert zig-watch-scp/dev`                                                   | `pass show zig-watch-scp/dev`                            |
-
-Windows, using DPAPI so only your Windows account can decrypt the stored blob:
-
-```powershell
-# once; prompts without echoing
-$secure = Read-Host -AsSecureString 'Password for dev'
-ConvertFrom-SecureString $secure | Set-Content "$env:APPDATA\zig-watch-scp\dev.dpapi"
-```
-
-```ini
-password_command=powershell -NoProfile -Command "$s = Get-Content ($env:APPDATA + '\zig-watch-scp\dev.dpapi'); [System.Net.NetworkCredential]::new('', (ConvertTo-SecureString $s)).Password"
-```
-
-The helper runs with your privileges, exactly like a `git credential` helper: any
-process running as you could ask the same store, but nothing plaintext sits in a
-file that a casual scan (or an agent grepping the home directory) will find. For
-the strongest posture, use the SSH agent or short-lived credentials, where this
-tool never sees a reusable secret.
-
-The same mechanism covers an encrypted key's passphrase with
-`passphrase_command=`. Commands are executed **directly, without a shell**:
-arguments are split on whitespace and may be quoted with `'` or `"`; pipes and
-redirects are not interpreted (use a script if you need them). stdout must be a
-single line; an empty result or a non-zero exit is an error.
-
-#### Secret file (CI mounts and last resorts)
-
-For CI, mount the secret from the CI secret store and point at it — that file is
-not in a home directory:
-
-```sh
-SCP_PASSWORD_FILE=/run/secrets/sync_password sync -c sync.conf
-```
-
-`password_file=` in the config does the same, but **do not keep a plaintext
-password in your home directory**: agents and malware scan for
-`.password`, `.env`, `*.secret`, `id_*` and similar names. If you must use one,
-restrict it with `chmod 600` (POSIX) or `icacls` (Windows), and prefer
-`password_command` instead.
-
-#### Password sources and precedence
-
-For both the password and the passphrase, the first available source wins:
-
-| Priority | Source                                    | Example                                   |
-| -------- | ----------------------------------------- | ----------------------------------------- |
-| 1        | `--password-file <path>`                  | `sync --password-file ./dev.pass -c ...`  |
-| 2        | `--password-command <cmd>`                | `sync --password-command 'op read ...'`   |
-| 3        | positional password                       | `sync host user 'secret' -c sync.conf`    |
-| 4        | `SCP_PASSWORD_FILE` (a path)              | `SCP_PASSWORD_FILE=/run/secrets/pw sync`  |
-| 5        | `SCP_PASSWORD_COMMAND` (a command)        | `SCP_PASSWORD_COMMAND='pass show x' sync` |
-| 6        | `SCP_PASSWORD` (the value)                | `SCP_PASSWORD='secret' sync -c ...`       |
-| 7        | `password_command=` in the config         | `password_command=security ... -w`        |
-| 8        | `password_file=` in the config            | `password_file=/run/secrets/sync`         |
-| 9        | `password=` in the config (deprecated)    | warns on every run                        |
-
-The passphrase uses the matching names: `--passphrase-file`,
-`--passphrase-command`, `SCP_PASSPHRASE_FILE`, `SCP_PASSPHRASE_COMMAND`,
-`SCP_PASSPHRASE`, `passphrase_command=`, `passphrase_file=`, `passphrase=`.
-
-#### Why `--var` may not carry a password
-
-`--var MY_PASSWORD=...` is **rejected**:
-
-```
-Config error: --var MY_PASSWORD=... is not allowed: names containing PASSWORD or PASSPHRASE may not be passed on the command line.
-```
-
-`--var` values are visible in shell history and in the process listing (`ps`,
-Task Manager), so any local user or process can read them. Names containing
-PASSWORD or PASSPHRASE are therefore refused for `--var` (and `-D`).
-
-Environment-provided variables are still allowed, because they are the normal
-place for a shell profile or CI secret. They are, however, inherited by child
-processes, which is why a credential-store command or a mounted file is
-preferred over `SCP_PASSWORD` for unattended runs.
-
-#### Secret file rules
-
-- One line; a single trailing newline (LF or CRLF) is ignored.
-- Empty files and files with more than one line are rejected.
-- The file must be readable only by you. On POSIX a group/world-readable file
-  prints a warning with the `chmod 600` command to run; on Windows use `icacls`.
-- Keep it out of the repository and off network shares. Prefer a CI-mounted
-  secret over a file under your home directory.
+The safe setup — SSH agent, OS keychain/vault helper recipes, CI-mounted
+secrets, and why a plaintext file in your home directory is a bad idea — lives
+on its own page: **[SECURE-AUTH.md](SECURE-AUTH.md)**.
 
 ### SSH Config Support
 
