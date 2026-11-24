@@ -104,3 +104,25 @@ These removals/renames are relevant to this codebase:
 - The fs-meta socket path is for the next step: fs-meta watches non-gitignored
   project files, while zig-watch-scp watches ignored build outputs. The
   nightwatch path remains the integral default.
+
+## 7. Release Workflow and CI Reruns
+
+- Publishing happens only when a `v*` tag is pushed
+  (`.github/workflows/release.yml`). A normal commit to `main` never publishes a
+  release.
+- The workflow builds four targets (`x86_64-linux`, `x86_64-windows`,
+  `x86_64-macos`, `aarch64-macos`), then the `Create Release` job publishes the
+  archives. If any build fails, the release job is skipped, so no release is
+  created.
+- **Do not re-trigger the workflow from an agent**: do not delete and re-push a
+  tag, do not push a new tag to retry, and do not loop on the API. When a job
+  fails, report the failed job and stop.
+- Runner **queue timeouts** make macOS (and occasionally Windows) builds fail
+  spuriously. The maintainer re-runs the failed jobs manually from the Actions
+  UI ("Re-run failed jobs"), which normally succeeds.
+- Before tagging, verify the release targets locally with
+  `zig build -Dtarget=<target>`; a build that succeeds locally but fails in CI
+  is almost always a queue/runner problem, not a code problem.
+- Job logs need authentication. Without a token, reason from the job steps and
+  local cross-builds instead of trying to fetch logs.
+
