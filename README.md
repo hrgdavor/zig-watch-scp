@@ -29,14 +29,14 @@ sync -w -c sync.conf
 
 The tool syncs only changed files on startup, then watches and re-syncs on every save.
 
-Using a password or an encrypted key? See **[SECURE-AUTH.md](SECURE-AUTH.md)** for the safe setup (SSH agent, OS keychain, CI secrets).
+Using a password or an encrypted key? See **[SECURE-AUTH.md](https://github.com/hrgdavor/zig-watch-scp/blob/main/SECURE-AUTH.md)** for the safe setup (SSH agent, OS keychain, CI secrets).
 
 ## What It Can Do
 
 - **Multiple folder pairs** — sync several directories in one config, with per-folder include/exclude patterns
 - **Cross-platform watching** — nightwatch backends: inotify (Linux), ReadDirectoryChangesW (Windows), FSEvents (native macOS), kqueue (BSD and macOS cross-builds)
 - **Fast change detection** — content hashing (default) or `mtime`+`size` for large binary trees
-- **SSH agent support** — works with KeePassXC and other agents; no credentials in config files (see [SECURE-AUTH.md](SECURE-AUTH.md))
+- **SSH agent support** — works with KeePassXC and other agents; no credentials in config files (see [SECURE-AUTH.md](https://github.com/hrgdavor/zig-watch-scp/blob/main/SECURE-AUTH.md))
 - **SSH config integration** — use `~/.ssh/config` aliases as the `host` value
 - **Text file normalisation** — CRLF→LF before checksumming so Windows edits don't force re-uploads
 - **Version file** — automatically writes a timestamped JSON/INI "heartbeat" to the remote on each sync
@@ -82,21 +82,21 @@ sync --var SUBDIR=feature-x -w -c sync.conf
 HOST=prod.example.com sync -c sync.conf
 ```
 
-→ See [Config Variable Expansion](DOCUMENTATION.md#config-variable-expansion) for the full priority rules and reasoning.
+→ See [Config Variable Expansion](https://github.com/hrgdavor/zig-watch-scp/blob/main/DOCUMENTATION.md#config-variable-expansion) for the full priority rules and reasoning.
 
 ## Key CLI Flags
 
-| Flag                                 | Description                         |
-| ------------------------------------ | ----------------------------------- |
-| `-c <path>` or `-c -`                | Config file path or stdin           |
-| `-w`                                 | Watch mode                          |
-| `--var NAME=value` / `-D NAME=value` | Set config variable (repeatable)    |
-| `--check hash\                       | mtime_size`                         | Change detection mode |
-| `--no-db`                            | Skip remote checksum database       |
-| `--cleanup`                          | Remove remote files missing locally |
-| `--dry-run`                          | Show changes without making them    |
-| `--exec <cmd>`                       | Run command on remote after sync    |
-| `--color` / `--no-color`             | Force or disable ANSI colors        |
+| Flag                                  | Description                         |
+| ------------------------------------- | ----------------------------------- |
+| `-c <path>` or `-c -`                 | Config file path or stdin           |
+| `-w`                                  | Watch mode                          |
+| `--var NAME=value` / `-D NAME=value`  | Set config variable (repeatable)    |
+| `--check hash` / `--check mtime_size` | Change detection mode               |
+| `--no-db`                             | Skip remote checksum database       |
+| `--cleanup`                           | Remove remote files missing locally |
+| `--dry-run`                           | Show changes without making them    |
+| `--exec <cmd>`                        | Run command on remote after sync    |
+| `--color` / `--no-color`              | Force or disable ANSI colors        |
 
 ## priv pub key pairs
 
@@ -108,9 +108,8 @@ ssh-keygen -t rsa -b 4096 -m PEM -f ~/my.devkey.rsa.pem
 
 ## Full Documentation
 
-→ **[SECURE-AUTH.md](SECURE-AUTH.md)** — secure authentication setup: SSH agent, OS keychain/vault helpers, CI secrets.
-
-→ **[DOCUMENTATION.md](DOCUMENTATION.md)** — complete config reference, all CLI options, ACL permissions, version files, glob patterns, and more.
+- **[SECURE-AUTH.md](https://github.com/hrgdavor/zig-watch-scp/blob/main/SECURE-AUTH.md)** — secure authentication setup: SSH agent, OS keychain/vault helpers, CI secrets.
+- **[DOCUMENTATION.md](https://github.com/hrgdavor/zig-watch-scp/blob/main/DOCUMENTATION.md)** — complete config reference, all CLI options, ACL permissions, version files, glob patterns.
 
 ## License
 
