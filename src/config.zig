@@ -376,6 +376,7 @@ pub const Config = struct {
             \\      --cleanup             Remove remote files not present locally
             \\      --watch-delay <ms>    Delay before syncing after change (default: 200)
             \\      --exec <cmd>          Remote command to run after sync
+            \\      --var NAME=value      Define ${{NAME}} for this run (repeatable)
             \\  -w, --watch               Enable watch mode (continuous sync)
             \\      --no-color            Disable color output
             \\  -h, --help               Show this help
@@ -492,17 +493,59 @@ pub const Config = struct {
         return result;
     }
 
-    /// Expand ${VARNAME} placeholders in a config value.
-    /// Priority: real environment variable > ENV.VARNAME= config default.
-    /// Returns error.UndefinedConfigVariable if the variable is not found in either.
-    /// Caller owns the returned slice (always allocated, even when no expansion happens).
+    const VarSpec = struct {
+        name: []const u8,
+        default: ?[]const u8,
+    };
+
+    /// Explicit error set: `expandVars` and `appendVarDefault` are mutually
+    /// recursive, which Zig's inferred error sets cannot resolve.
+    const ExpandError = error{
+        OutOfMemory,
+        UndefinedConfigVariable,
+        EmptyConfigVariable,
+        InvalidVariableName,
+        UnclosedVariableBrace,
+    };
+
+    /// Split `${NAME}` / `${NAME:-default}` contents. The default part may itself
+    /// contain `${...}` placeholders and is expanded recursively when used.
+    fn splitVarSpec(inner: []const u8) VarSpec {
+        if (std.mem.indexOf(u8, inner, ":-")) |sep| {
+            return .{ .name = inner[0..sep], .default = inner[sep + 2 ..] };
+        }
+        return .{ .name = inner, .default = null };
+    }
+
+    fn appendVarDefault(
+        allocator: std.mem.Allocator,
+        result: *std.ArrayList(u8),
+        default_value: []const u8,
+        environ: std.process.Environ,
+        cli_vars: std.StringHashMap([]const u8),
+        env_defaults: *const std.StringHashMap([]const u8),
+    ) ExpandError!void {
+        const expanded = try expandVars(allocator, default_value, environ, cli_vars, env_defaults);
+        defer allocator.free(expanded);
+        try result.appendSlice(allocator, expanded);
+    }
+
+    /// Expand `${VARNAME}` and `${VARNAME:-default}` placeholders in a config
+    /// value. Any value in the file may use them.
+    ///
+    /// Resolution order: `--var` CLI flag > real environment variable >
+    /// `ENV.VARNAME=` default in the config file > inline `:-` default.
+    /// A variable whose resolved value is empty counts as unset when a `:-`
+    /// default is present (shell semantics); without a default an empty value is
+    /// error.EmptyConfigVariable, and a completely unset name without a default
+    /// is error.UndefinedConfigVariable. Caller owns the returned slice.
     fn expandVars(
         allocator: std.mem.Allocator,
         value: []const u8,
         environ: std.process.Environ,
         cli_vars: std.StringHashMap([]const u8),
         env_defaults: *const std.StringHashMap([]const u8),
-    ) ![]const u8 {
+    ) ExpandError![]const u8 {
         if (std.mem.indexOf(u8, value, "${") == null) {
             return allocator.dupe(u8, value);
         }
@@ -511,31 +554,70 @@ pub const Config = struct {
         var i: usize = 0;
         while (i < value.len) {
             if (i + 1 < value.len and value[i] == '$' and value[i + 1] == '{') {
-                const name_start = i + 2;
-                const close = std.mem.indexOfScalarPos(u8, value, name_start, '}') orelse {
-                    std.debug.print("Config error: unclosed '${{' in value: {s}\n", .{value});
-                    return error.UnclosedVariableBrace;
-                };
-                const var_name = value[name_start..close];
-                // Priority: 1. --var CLI flag  2. real env var  3. ENV.X= config default
-                if (cli_vars.get(var_name)) |cli_val| {
-                    try result.appendSlice(allocator, cli_val);
-                } else if (environ.getAlloc(allocator, var_name)) |env_val| {
-                    defer allocator.free(env_val);
-                    try result.appendSlice(allocator, env_val);
-                } else |_| {
-                    if (env_defaults.get(var_name)) |default_val| {
-                        try result.appendSlice(allocator, default_val);
-                    } else {
-                        std.debug.print(
-                            "Config error: variable '${{{s}}}' is not defined.\n" ++
-                                "  Set it via: --var {s}=value  |  env var {s}  |  ENV.{s}= in config\n",
-                            .{ var_name, var_name, var_name, var_name },
-                        );
-                        return error.UndefinedConfigVariable;
+                // Find the matching brace, so `${A:-${B}}` nests correctly.
+                var depth: usize = 1;
+                var j = i + 2;
+                while (j < value.len) : (j += 1) {
+                    if (value[j] == '}') {
+                        depth -= 1;
+                        if (depth == 0) break;
+                    } else if (value[j] == '{' and value[j - 1] == '$') {
+                        depth += 1;
                     }
                 }
-                i = close + 1;
+                if (depth != 0) {
+                    std.debug.print("Config error: unclosed '${{' in value: {s}\n", .{value});
+                    return error.UnclosedVariableBrace;
+                }
+
+                const spec = splitVarSpec(value[i + 2 .. j]);
+                if (spec.name.len == 0) {
+                    std.debug.print("Config error: empty variable name in '{s}'\n", .{value});
+                    return error.InvalidVariableName;
+                }
+
+                var env_value: ?[]u8 = null;
+                defer {
+                    if (env_value) |owned| allocator.free(owned);
+                }
+
+                const found: ?[]const u8 = blk: {
+                    if (cli_vars.get(spec.name)) |v| break :blk v;
+                    if (environ.getAlloc(allocator, spec.name)) |v| {
+                        env_value = v;
+                        break :blk v;
+                    } else |_| {}
+                    break :blk env_defaults.get(spec.name);
+                };
+
+                if (found) |v| {
+                    if (v.len > 0) {
+                        try result.appendSlice(allocator, v);
+                    } else if (spec.default) |default_value| {
+                        try appendVarDefault(allocator, &result, default_value, environ, cli_vars, env_defaults);
+                    } else {
+                        // An empty value would silently produce broken paths such
+                        // as ":/opt/app/src". A literal empty value in the file is
+                        // still allowed; only an empty *variable* is an error.
+                        std.debug.print(
+                            "Config error: variable '${{{s}}}' is empty and has no inline default.\n" ++
+                                "  Set it to a value, or write ${{{s}:-default}} to allow an empty/absent value.\n",
+                            .{ spec.name, spec.name },
+                        );
+                        return error.EmptyConfigVariable;
+                    }
+                } else if (spec.default) |default_value| {
+                    try appendVarDefault(allocator, &result, default_value, environ, cli_vars, env_defaults);
+                } else {
+                    std.debug.print(
+                        "Config error: variable '${{{s}}}' is not defined.\n" ++
+                            "  Set it via: --var {s}=value  |  env var {s}  |  ENV.{s}= in config\n" ++
+                            "  Or give it an inline fallback in the config: ${{{s}:-default}}\n",
+                        .{ spec.name, spec.name, spec.name, spec.name, spec.name },
+                    );
+                    return error.UndefinedConfigVariable;
+                }
+                i = j + 1;
             } else {
                 try result.append(allocator, value[i]);
                 i += 1;

@@ -41,6 +41,12 @@ pub fn main(init: std.process.Init) !void {
                 std.debug.print("Error: Unknown argument.\n", .{});
                 std.process.exit(1);
             },
+            // The detailed message was already printed while expanding the value.
+            error.UndefinedConfigVariable,
+            error.EmptyConfigVariable,
+            error.InvalidVariableName,
+            error.UnclosedVariableBrace,
+            => std.process.exit(1),
             else => {},
         }
         return err;

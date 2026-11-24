@@ -155,15 +155,153 @@ fn baseConfig(allocator: std.mem.Allocator) !Config {
 /// Parse `content` as a config file using an arena so the test does not have to
 /// mirror the parser's ownership rules.
 fn parseConfigFile(arena: std.mem.Allocator, io: std.Io, file_name: []const u8, content: []const u8) !Config {
+    return parseConfigFileWithVars(arena, io, file_name, content, std.StringHashMap([]const u8).init(arena));
+}
+
+fn parseConfigFileWithVars(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    file_name: []const u8,
+    content: []const u8,
+    cli_vars: std.StringHashMap([]const u8),
+) !Config {
     const file = try std.Io.Dir.cwd().createFile(io, file_name, .{});
     try file.writeStreamingAll(io, content);
     file.close(io);
     defer std.Io.Dir.cwd().deleteFile(io, file_name) catch {};
 
     var cfg = try baseConfig(arena);
-    const cli_vars = std.StringHashMap([]const u8).init(arena);
     try config.Config.parseIntoConfig(arena, io, std.testing.environ, cli_vars, &cfg, file_name);
     return cfg;
+}
+
+test "config: inline variable default" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cfg = try parseConfigFile(arena, std.testing.io, "test_var_inline.conf",
+        \\[folder]
+        \\local_dir = ./src
+        \\remote_dir = ${REMOTE_ROOT:-/opt/app}/src
+    );
+
+    try std.testing.expectEqualStrings("/opt/app/src", cfg.folders[0].remote_dir);
+}
+
+test "config: ENV default beats inline default" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cfg = try parseConfigFile(arena, std.testing.io, "test_var_env.conf",
+        \\ENV.REMOTE_ROOT=/committed
+        \\[folder]
+        \\local_dir = ./src
+        \\remote_dir = ${REMOTE_ROOT:-/fallback}/src
+    );
+
+    try std.testing.expectEqualStrings("/committed/src", cfg.folders[0].remote_dir);
+}
+
+test "config: --var beats ENV and inline defaults" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var cli_vars = std.StringHashMap([]const u8).init(arena);
+    try cli_vars.put("REMOTE_ROOT", "/cli");
+
+    const cfg = try parseConfigFileWithVars(arena, std.testing.io, "test_var_cli.conf",
+        \\ENV.REMOTE_ROOT=/committed
+        \\[folder]
+        \\local_dir = ./src
+        \\remote_dir = ${REMOTE_ROOT:-/fallback}/src
+    , cli_vars);
+
+    try std.testing.expectEqualStrings("/cli/src", cfg.folders[0].remote_dir);
+}
+
+test "config: nested inline defaults" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cfg = try parseConfigFile(arena, std.testing.io, "test_var_nested.conf",
+        \\[folder]
+        \\local_dir = ./src
+        \\remote_dir = ${A:-${B:-/nested}}/src
+    );
+
+    try std.testing.expectEqualStrings("/nested/src", cfg.folders[0].remote_dir);
+}
+
+test "config: empty variable falls back to inline default" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cfg = try parseConfigFile(arena, std.testing.io, "test_var_empty_default.conf",
+        \\ENV.REMOTE_ROOT=
+        \\[folder]
+        \\local_dir = ./src
+        \\remote_dir = ${REMOTE_ROOT:-/fallback}/src
+    );
+
+    try std.testing.expectEqualStrings("/fallback/src", cfg.folders[0].remote_dir);
+}
+
+test "config: empty variable without default is an error" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectError(error.EmptyConfigVariable, parseConfigFile(arena, std.testing.io, "test_var_empty.conf",
+        \\ENV.REMOTE_ROOT=
+        \\[folder]
+        \\local_dir = ./src
+        \\remote_dir = ${REMOTE_ROOT}/src
+    ));
+}
+
+test "config: undefined variable without default is an error" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectError(error.UndefinedConfigVariable, parseConfigFile(arena, std.testing.io, "test_var_missing.conf",
+        \\[folder]
+        \\local_dir = ./src
+        \\remote_dir = ${MISSING_ROOT}/src
+    ));
+}
+
+test "config: empty variable name is rejected" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectError(error.InvalidVariableName, parseConfigFile(arena, std.testing.io, "test_var_badname.conf",
+        \\[folder]
+        \\local_dir = ./src
+        \\remote_dir = ${:-/fallback}/src
+    ));
+}
+
+test "config: variables expand in global values and a lone '$' survives" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cfg = try parseConfigFile(arena, std.testing.io, "test_var_global.conf",
+        \\host = ${DEV_HOST:-dev.example.com}
+        \\[folder]
+        \\local_dir = ./src
+        \\remote_dir = /opt/a$b
+    );
+
+    try std.testing.expectEqualStrings("dev.example.com", cfg.host);
+    try std.testing.expectEqualStrings("/opt/a$b", cfg.folders[0].remote_dir);
 }
 
 test "config: each folder keeps its own scpdb" {

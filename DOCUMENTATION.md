@@ -278,63 +278,106 @@ fs-meta integration.
 
 ### Config Variable Expansion
 
-Any config value can contain `${VARNAME}` placeholders resolved at load time.
+Any value in the config may contain `${NAME}` placeholders; `${NAME:-default}`
+adds a fallback, so a config checked into git works even before a developer sets
+anything.
 
-**Resolution order (highest to lowest priority):**
+**Resolution order (highest to lowest):**
 
-| Priority | Source                        | Example                                 |
-| -------- | ----------------------------- | --------------------------------------- |
-| 1        | `--var` CLI flag              | `sync --var SUBDIR=v2 -c sync.conf`     |
-| 2        | Real environment variable     | `export SUBDIR=v2`                      |
-| 3        | `ENV.VARNAME=` config default | `ENV.SUBDIR=project` in `sync.conf`     |
-| —        | **Error**                     | Variable missing from all three sources |
+| Priority | Source                        | Example                                      |
+| -------- | ----------------------------- | -------------------------------------------- |
+| 1        | `--var` CLI flag              | `sync --var REMOTE_ROOT=/home/me/app`        |
+| 2        | Real environment variable     | `export REMOTE_ROOT=/home/me/app`            |
+| 3        | `ENV.VARNAME=` config default | `ENV.REMOTE_ROOT=/opt/app` in `sync.conf`    |
+| 4        | Inline `:-` default           | `${REMOTE_ROOT:-/opt/app}`                   |
+| —        | **Error**                     | No value and no inline default               |
+
+`${NAME:-default}` also uses the default when the resolved value is **empty**
+(shell `:-` semantics). Defaults may reference other variables and nest:
+`${REMOTE_ROOT:-${HOME}/app}`. Without a `:-` default, an empty value is an
+error rather than a silently broken path; a literal empty value in the file
+(such as `password=`) is still allowed.
 
 **Why this order?**
 
-- **`--var` is highest**: most explicit — typed on *this specific invocation*. Also the only override that doesn't pollute the shell environment; `export` leaks into the whole session, `--var` is strictly scoped to one run.
-- **Env vars are second**: represent the process's context (Docker, CI/CD, shell profile). Right for per-machine or per-environment settings spanning many runs.
-- **`ENV.X=` defaults are last**: live in the file, version-controlled, visible. Apply only when nothing external is specified.
-- **Missing = error**: silent empty expansion creates broken paths like `:/opt/app/src` that are very hard to debug.
+- **`--var` is highest**: most explicit — typed on *this specific invocation*. It is also the only override that doesn't touch the shell environment, so one run cannot leak into the next.
+- **Env vars are second**: the right place for a shell profile, IDE run configuration, Docker Compose or CI job that applies to many runs.
+- **`ENV.X=` defaults are third**: they live in the file, are version-controlled and visible to the whole team.
+- **Inline `:-` defaults are last**: they make the config self-contained, so a fresh checkout syncs without setup.
+- **Still missing = error**: silent empty expansion produces broken paths like `:/opt/app/src` that are hard to debug.
 
-**Example — reusable team config:**
+**Where variables are expanded:** every config value — `host`, `username`,
+`key_path`, `password`, `passphrase`, `local_dir`, `remote_dir`, `scpdb`,
+`includes`, `excludes`, `trigger_*`, `version_*`, `exec_cmd`, and modes.
+`ENV.NAME=` lines are read from the global section (before the first `[section]`)
+and are expanded in file order, so an `ENV.` value may use variables defined
+above it.
+
+**Reusable team config (checked into git):**
+
 ```ini
-# Defaults — override any of these from the shell or --var
-ENV.HOST=dev.example.com
-ENV.REMOTE_BASE=/opt/app
-ENV.SUBDIR=project
+# Shared defaults. Each developer overrides only what differs for them.
+ENV.DEV_HOST=dev.example.com
+ENV.DEV_USER=ubuntu
+ENV.REMOTE_ROOT=/opt/app
 
-host=${HOST}
+host=${DEV_HOST}
+username=${DEV_USER}
+
+# Optional: publish a version file after a sync
+version_from=./version.json
+version_to=${REMOTE_ROOT}/version.json
+version_name=${DEV_USER}-api
 
 [folder]
-local_dir=./src
-remote_dir=${REMOTE_BASE}/${SUBDIR}/src
+local_dir=./api
+remote_dir=${REMOTE_ROOT}/api
 
-version_from=./version.json
-version_to=${REMOTE_BASE}/${SUBDIR}/version.json
-version_name=${SUBDIR}
+[folder]
+local_dir=./worker
+remote_dir=${REMOTE_ROOT}/worker
+
+[folder]
+local_dir=./conf
+remote_dir=${REMOTE_ROOT}/conf
 ```
 
+A developer sets **one** value — in their environment or with `--var` — and the
+whole config follows. Per shell profile or IDE run configuration:
+
 ```sh
-# Use file defaults
+# Linux/macOS
+export REMOTE_ROOT=/home/me/app
 sync -c sync.conf
-
-# Override via --var (beats env vars)
-sync --var SUBDIR=feature-x --var HOST=staging.example.com -c sync.conf
-
-# Override via environment variable (Linux/macOS)
-SUBDIR=project-v2 sync -c sync.conf
-
-# Windows cmd (scoped to one invocation)
-cmd /C "set SUBDIR=project-v2 && sync -c sync.conf"
-
-# Windows PowerShell (scoped)
-& { $env:SUBDIR = "project-v2"; sync -c sync.conf }
 ```
 
-**Error on undefined variable:**
+```powershell
+# Windows PowerShell
+$env:REMOTE_ROOT = 'D:\srv\app'
+sync -c sync.conf
+```
+
+For a one-off run, or CI, keep it scoped to the invocation:
+
 ```sh
-Config error: variable '${HOST}' is not defined.
-  Set it via: --var HOST=value  |  env var HOST  |  ENV.HOST= in config
+sync --var REMOTE_ROOT=/home/me/app -c sync.conf
+REMOTE_ROOT=/srv/ci/app sync -c sync.conf
+```
+
+```powershell
+sync --var REMOTE_ROOT=D:\srv\app -c sync.conf
+```
+
+Nothing personal needs to be committed: the config holds shared defaults, and
+each developer's root comes from the environment or `--var`. Credentials follow
+the same rule — see [Credentials via Environment Variables](#credentials-via-environment-variables).
+
+**Error when a variable has neither a value nor a default:**
+
+```sh
+Config error: variable '${REMOTE_ROOT}' is not defined.
+  Set it via: --var REMOTE_ROOT=value  |  env var REMOTE_ROOT  |  ENV.REMOTE_ROOT= in config
+  Or give it an inline fallback in the config: ${REMOTE_ROOT:-default}
 ```
 
 ---
@@ -380,10 +423,16 @@ Add `key_path` to `sync.conf`. If the key is encrypted, add `passphrase` as well
 
 ### Credentials via Environment Variables
 
-- `SYNC_SSH_PWD` — SSH password fallback
-- `SYNC_SSH_PASSPHRASE` — Key passphrase fallback
+Keep secrets out of a committed config:
 
-These are checked after explicit config values but before prompting.
+- `SCP_PASSWORD` — SSH password fallback
+- `SCP_PASSPHRASE` — Key passphrase fallback
+
+Both are read only when the config has no `password` / `passphrase` value, and
+before any prompting. The same variables can be set per developer in their shell
+profile or CI secrets, while the committed config stays credential-free. For
+key-based logins, prefer an SSH agent (or `~/.ssh/config` `IdentityFile`) over a
+password.
 
 ### SSH Config Support
 
