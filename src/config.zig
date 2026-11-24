@@ -70,11 +70,15 @@ pub const Config = struct {
 
     /// Paths to files holding the secret, so a committed config never contains
     /// the secret itself. A path is not sensitive; the file is (see
-    /// `readSecretFile`). Resolved with the precedence documented in
-    /// DOCUMENTATION.md: --password-file, SCP_PASSWORD_FILE, SCP_PASSWORD,
-    /// password_file, password.
+    /// `readSecretFile`). Prefer `password_command` (an OS keychain or vault
+    /// CLI) over a plaintext file in the home directory.
     password_file: ?[]const u8 = null,
     passphrase_file: ?[]const u8 = null,
+    /// Command whose stdout is the secret (one line). Use it to read from the
+    /// OS credential store, KeePassXC, 1Password, `pass`, Vault, etc., so no
+    /// plaintext secret is stored on disk. Runs with the user's privileges.
+    password_command: ?[]const u8 = null,
+    passphrase_command: ?[]const u8 = null,
 
     // Standalone create mode
     create_folder: ?[]const u8,
@@ -114,7 +118,9 @@ pub const Config = struct {
         var cli_username: ?[]const u8 = null;
         var cli_password: ?[]const u8 = null;
         var cli_password_file: ?[]const u8 = null;
+        var cli_password_command: ?[]const u8 = null;
         var cli_passphrase_file: ?[]const u8 = null;
+        var cli_passphrase_command: ?[]const u8 = null;
         var cli_check: ?CheckMode = null;
         var cli_no_db: bool = false;
         // --var VARNAME=value entries: highest priority in variable expansion
@@ -223,10 +229,18 @@ pub const Config = struct {
                 i += 1;
                 if (i >= raw_args.len) return error.MissingArgValue;
                 cli_password_file = raw_args[i];
+            } else if (std.mem.eql(u8, arg, "--password-command")) {
+                i += 1;
+                if (i >= raw_args.len) return error.MissingArgValue;
+                cli_password_command = raw_args[i];
             } else if (std.mem.eql(u8, arg, "--passphrase-file")) {
                 i += 1;
                 if (i >= raw_args.len) return error.MissingArgValue;
                 cli_passphrase_file = raw_args[i];
+            } else if (std.mem.eql(u8, arg, "--passphrase-command")) {
+                i += 1;
+                if (i >= raw_args.len) return error.MissingArgValue;
+                cli_passphrase_command = raw_args[i];
             } else if (std.mem.eql(u8, arg, "--var") or std.mem.eql(u8, arg, "-D")) {
                 i += 1;
                 if (i >= raw_args.len) return error.MissingArgValue;
@@ -356,25 +370,30 @@ pub const Config = struct {
         try resolveSshConfig(arena_allocator, init, &config);
 
         // â”€â”€ resolve credentials â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        // Secrets never travel through config variables. They come from a file
-        // (safe to reference from a committed config), the environment, or the
-        // positional argument. Highest priority first:
-        //   --password-file > positional password > SCP_PASSWORD_FILE >
-        //   SCP_PASSWORD > password_file (config) > password (config literal)
+        // Secrets never travel through config variables. Highest priority first:
+        //   --password-file, --password-command, positional password,
+        //   SCP_PASSWORD_FILE, SCP_PASSWORD_COMMAND, SCP_PASSWORD,
+        //   password_command, password_file, password.
         config.password = try resolveSecret(arena_allocator, init.io, init.minimal.environ, .{
             .cli_file = cli_password_file,
+            .cli_command = cli_password_command,
             .cli_value = cli_password,
             .env_file_name = "SCP_PASSWORD_FILE",
+            .env_command_name = "SCP_PASSWORD_COMMAND",
             .env_value_name = "SCP_PASSWORD",
+            .config_command = config.password_command,
             .config_file = config.password_file,
             .config_value = config.password,
             .what = "password",
         });
         config.passphrase = try resolveSecret(arena_allocator, init.io, init.minimal.environ, .{
             .cli_file = cli_passphrase_file,
+            .cli_command = cli_passphrase_command,
             .cli_value = null,
             .env_file_name = "SCP_PASSPHRASE_FILE",
+            .env_command_name = "SCP_PASSPHRASE_COMMAND",
             .env_value_name = "SCP_PASSPHRASE",
+            .config_command = config.passphrase_command,
             .config_file = config.passphrase_file,
             .config_value = config.passphrase,
             .what = "passphrase",
@@ -411,7 +430,9 @@ pub const Config = struct {
             \\      --exec <cmd>          Remote command to run after sync
             \\      --var NAME=value      Define ${{NAME}} for this run (repeatable)
             \\      --password-file <f>   Read the SSH password from a file (one line)
+            \\      --password-command <c> Read the SSH password from a command's stdout
             \\      --passphrase-file <f> Read the key passphrase from a file (one line)
+            \\      --passphrase-command <c> Read the passphrase from a command's stdout
             \\  -w, --watch               Enable watch mode (continuous sync)
             \\      --no-color            Disable color output
             \\  -h, --help               Show this help
@@ -655,10 +676,15 @@ pub const Config = struct {
     pub const SecretSource = struct {
         /// `--password-file` / `--passphrase-file`.
         cli_file: ?[]const u8,
+        /// `--password-command` / `--passphrase-command`.
+        cli_command: ?[]const u8,
         /// Positional password argument (`sync host user password`).
         cli_value: ?[]const u8,
         env_file_name: []const u8,
+        env_command_name: []const u8,
         env_value_name: []const u8,
+        /// `password_command=` / `passphrase_command=` in the config.
+        config_command: ?[]const u8,
         /// `password_file=` / `passphrase_file=` in the config.
         config_file: ?[]const u8,
         /// `password=` / `passphrase=` in the config (deprecated, warns).
@@ -668,7 +694,7 @@ pub const Config = struct {
     };
 
     /// Pick the secret with the documented precedence. An unreadable or invalid
-    /// secret file is a hard error: silently continuing would authenticate with
+    /// secret source is a hard error: silently continuing would authenticate with
     /// no secret and produce a confusing failure later.
     pub fn resolveSecret(
         allocator: std.mem.Allocator,
@@ -677,15 +703,148 @@ pub const Config = struct {
         src: SecretSource,
     ) ![]const u8 {
         if (src.cli_file) |path| return readSecretFile(allocator, io, environ, path, src.what);
+        if (src.cli_command) |command| return runSecretCommand(allocator, io, command, src.what);
         if (src.cli_value) |value| return value;
         if (environ.getAlloc(allocator, src.env_file_name)) |path| {
             return readSecretFile(allocator, io, environ, path, src.what);
         } else |_| {}
+        if (environ.getAlloc(allocator, src.env_command_name)) |command| {
+            return runSecretCommand(allocator, io, command, src.what);
+        } else |_| {}
         if (environ.getAlloc(allocator, src.env_value_name)) |value| {
             return value;
         } else |_| {}
+        if (src.config_command) |command| return runSecretCommand(allocator, io, command, src.what);
         if (src.config_file) |path| return readSecretFile(allocator, io, environ, path, src.what);
         return src.config_value;
+    }
+
+    /// Split a helper command into arguments. Whitespace separates arguments;
+    /// single or double quotes group them. Inside double quotes `\\` and `\"`
+    /// are escapes; everywhere else backslashes are literal so Windows paths
+    /// survive. No shell is involved: pipes, redirects and variables are not
+    /// interpreted.
+    fn splitCommand(allocator: std.mem.Allocator, command: []const u8) ![]const []const u8 {
+        var args = std.ArrayList([]const u8).empty;
+        errdefer {
+            for (args.items) |arg| allocator.free(arg);
+            args.deinit(allocator);
+        }
+
+        var i: usize = 0;
+        while (i < command.len) {
+            while (i < command.len and std.ascii.isWhitespace(command[i])) i += 1;
+            if (i >= command.len) break;
+
+            var current = std.ArrayList(u8).empty;
+            errdefer current.deinit(allocator);
+            var quote: ?u8 = null;
+            while (i < command.len) : (i += 1) {
+                const c = command[i];
+                if (quote) |q| {
+                    if (c == q) {
+                        quote = null;
+                        continue;
+                    }
+                    if (q == '"' and c == '\\' and i + 1 < command.len and
+                        (command[i + 1] == '"' or command[i + 1] == '\\'))
+                    {
+                        try current.append(allocator, command[i + 1]);
+                        i += 1;
+                        continue;
+                    }
+                    try current.append(allocator, c);
+                } else {
+                    if (c == '"' or c == '\'') {
+                        quote = c;
+                        continue;
+                    }
+                    if (std.ascii.isWhitespace(c)) break;
+                    try current.append(allocator, c);
+                }
+            }
+            if (quote != null) {
+                current.deinit(allocator);
+                std.debug.print("Config error: unbalanced quote in secret command: {s}\n", .{command});
+                return error.SecretCommandInvalid;
+            }
+            try args.append(allocator, try current.toOwnedSlice(allocator));
+        }
+
+        return args.toOwnedSlice(allocator);
+    }
+
+    /// Run a credential-helper command and take its stdout as the secret.
+    ///
+    /// This is the recommended unattended channel: the command reads the secret
+    /// from a vault (OS keychain, KeePassXC, 1Password, `pass`, Vault, ...), so
+    /// no plaintext secret is stored in the config, the environment or a file
+    /// that an agent or malware scanning the home directory can pick up. The
+    /// command line itself contains no secret and is run with the user's
+    /// privileges, like `git credential` helpers.
+    pub fn runSecretCommand(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        command: []const u8,
+        what: []const u8,
+    ) ![]const u8 {
+        if (command.len == 0) {
+            std.debug.print("Config error: empty {s} command.\n", .{what});
+            return error.SecretCommandFailed;
+        }
+
+        const argv = try splitCommand(allocator, command);
+        defer {
+            for (argv) |arg| allocator.free(arg);
+            allocator.free(argv);
+        }
+        if (argv.len == 0) {
+            std.debug.print("Config error: empty {s} command.\n", .{what});
+            return error.SecretCommandFailed;
+        }
+
+        const result = std.process.run(allocator, io, .{
+            .argv = argv,
+            .stdout_limit = std.Io.Limit.limited(64 * 1024),
+            .stderr_limit = std.Io.Limit.limited(16 * 1024),
+        }) catch |err| {
+            std.debug.print(
+                "Config error: cannot run the {s} command ({s}).\n  Command: {s}\n",
+                .{ what, @errorName(err), command },
+            );
+            return error.SecretCommandFailed;
+        };
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        if (!result.term.success()) {
+            std.debug.print(
+                "Config error: the {s} command failed ({s}).\n  Command: {s}\n  Output: {s}\n",
+                .{ what, @tagName(result.term), command, std.mem.trim(u8, result.stderr, " \t\r\n") },
+            );
+            return error.SecretCommandFailed;
+        }
+
+        var end = result.stdout.len;
+        if (end > 0 and result.stdout[end - 1] == '\n') end -= 1;
+        if (end > 0 and result.stdout[end - 1] == '\r') end -= 1;
+        const secret = result.stdout[0..end];
+
+        if (std.mem.indexOfAny(u8, secret, "\r\n") != null) {
+            std.debug.print(
+                "Config error: the {s} command must print exactly one line.\n  Command: {s}\n",
+                .{ what, command },
+            );
+            return error.SecretCommandInvalid;
+        }
+        if (secret.len == 0) {
+            std.debug.print(
+                "Config error: the {s} command printed nothing.\n  Command: {s}\n",
+                .{ what, command },
+            );
+            return error.SecretCommandInvalid;
+        }
+        return try allocator.dupe(u8, secret);
     }
 
     /// Read a single-line secret from a file. A trailing newline (LF or CRLF) is
@@ -1038,6 +1197,8 @@ pub const Config = struct {
                     }
                 } else if (std.mem.eql(u8, key, "password_file")) {
                     config.password_file = try path_util.expandHomeAndNormalize(allocator, environ, value);
+                } else if (std.mem.eql(u8, key, "password_command")) {
+                    config.password_command = try allocator.dupe(u8, value);
                 } else if ((std.mem.eql(u8, key, "key_path") or std.mem.eql(u8, key, "key")) and config.key_path.len == 0) {
                     config.key_path = try path_util.expandHomeAndNormalize(allocator, environ, value);
                     if (config.verbose) std.debug.print("  Loaded key_path: {s}\n", .{config.key_path});
@@ -1052,6 +1213,8 @@ pub const Config = struct {
                     }
                 } else if (std.mem.eql(u8, key, "passphrase_file")) {
                     config.passphrase_file = try path_util.expandHomeAndNormalize(allocator, environ, value);
+                } else if (std.mem.eql(u8, key, "passphrase_command")) {
+                    config.passphrase_command = try allocator.dupe(u8, value);
                 } else if (std.mem.eql(u8, key, "parallel_threads")) {
                     config.parallel_threads = try std.fmt.parseInt(usize, value, 10);
                 } else if (std.mem.eql(u8, key, "watch_delay_ms")) {

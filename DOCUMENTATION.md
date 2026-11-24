@@ -163,32 +163,34 @@ EOF
 
 ### Global Settings
 
-| Key                | Default       | Description                                              |
-| ------------------ | ------------- | -------------------------------------------------------- |
-| `host`             | —             | Remote hostname or SSH config alias                      |
-| `username`         | —             | SSH username                                             |
-| `password`         | —             | SSH password (deprecated; use `password_file`)           |
-| `password_file`    | —             | File holding the SSH password (one line)                 |
-| `key_path`         | —             | Path to SSH private key                                  |
-| `passphrase`       | —             | Key passphrase (deprecated; use `passphrase_file`)       |
-| `passphrase_file`  | —             | File holding the key passphrase (one line)               |
-| `port`             | `22`          | SSH port                                                 |
-| `parallel_threads` | `4`           | Threads for hashing and parallel uploads                 |
-| `watch_delay_ms`   | `200`         | Debounce delay for file-change events (ms)               |
-| `watch_backend`    | `nightwatch`  | `nightwatch` or `fsmeta` (reserved, see below)           |
-| `fsmeta_socket`    | —             | fs-meta Unix socket path (reserved backend)              |
-| `compress`         | `false`       | Enable SSH compression                                   |
-| `cleanup`          | `false`       | Remove remote files missing locally                      |
-| `dry_run`          | `false`       | Dry run mode (don't upload or delete)                    |
-| `color`            | auto          | Force/disable ANSI color output                          |
-| `exec_cmd`         | —             | Remote command to run after each sync                    |
-| `file_mode`        | `0644`        | SFTP permission mode for created files                   |
-| `dir_mode`         | `0755`        | SFTP permission mode for created directories             |
-| `text_extensions`  | built-in list | Extensions treated as text (CRLF→LF normalised)          |
-| `version_from`     | —             | Local version template file path                         |
-| `version_to`       | —             | Remote path for processed version file                   |
-| `version_name`     | —             | Project name injected into version file                  |
-| `ENV.VARNAME`      | —             | Config-level default for `${VARNAME}` expansion          |
+| Key                  | Default       | Description                                              |
+| -------------------- | ------------- | -------------------------------------------------------- |
+| `host`               | —             | Remote hostname or SSH config alias                      |
+| `username`           | —             | SSH username                                             |
+| `password`           | —             | SSH password (deprecated; use a command or file)         |
+| `password_command`   | —             | Command printing the SSH password (OS keychain, vault)   |
+| `password_file`      | —             | File holding the SSH password (one line)                 |
+| `key_path`           | —             | Path to SSH private key                                  |
+| `passphrase`         | —             | Key passphrase (deprecated; use a command or file)       |
+| `passphrase_command` | —             | Command printing the key passphrase                      |
+| `passphrase_file`    | —             | File holding the key passphrase (one line)               |
+| `port`               | `22`          | SSH port                                                 |
+| `parallel_threads`   | `4`           | Threads for hashing and parallel uploads                 |
+| `watch_delay_ms`     | `200`         | Debounce delay for file-change events (ms)               |
+| `watch_backend`      | `nightwatch`  | `nightwatch` or `fsmeta` (reserved, see below)           |
+| `fsmeta_socket`      | —             | fs-meta Unix socket path (reserved backend)              |
+| `compress`           | `false`       | Enable SSH compression                                   |
+| `cleanup`            | `false`       | Remove remote files missing locally                      |
+| `dry_run`            | `false`       | Dry run mode (don't upload or delete)                    |
+| `color`              | auto          | Force/disable ANSI color output                          |
+| `exec_cmd`           | —             | Remote command to run after each sync                    |
+| `file_mode`          | `0644`        | SFTP permission mode for created files                   |
+| `dir_mode`           | `0755`        | SFTP permission mode for created directories             |
+| `text_extensions`    | built-in list | Extensions treated as text (CRLF→LF normalised)          |
+| `version_from`       | —             | Local version template file path                         |
+| `version_to`         | —             | Remote path for processed version file                   |
+| `version_name`       | —             | Project name injected into version file                  |
+| `ENV.VARNAME`        | —             | Config-level default for `${VARNAME}` expansion          |
 
 ### Folder Settings
 
@@ -424,72 +426,99 @@ Benefits:
 
 ### Key-based Authentication
 
-Add `key_path` to `sync.conf`. If the key is encrypted, add `passphrase_file=`
-(a one-line secret file) or let an SSH agent hold the decrypted key — see
+Add `key_path` to `sync.conf`. If the key is encrypted, let an SSH agent hold the
+decrypted key, or use `passphrase_command=` (a keychain/vault command) — see
 [Passwords and Passphrases](#passwords-and-passphrases).
 
 ### Passwords and Passphrases
 
-The short version: prefer an SSH key + agent. If a password is unavoidable, point
-the config at a per-user **secret file**; environment variables are a fallback for
-CI. Secrets are never accepted through `--var`.
+Prefer no secret at all. If a password is unavoidable, read it from the OS
+credential store with `password_command`; avoid a plaintext file in your home
+directory, because agents and malware scan exactly those paths for secrets.
+Secrets are never accepted through `--var`.
 
 #### Preferred: no stored secret
 
 Use a key with `ssh-agent` (or `IdentityFile` in `~/.ssh/config`). The agent holds
-the decrypted key for the session, so nothing password-like is stored by this tool:
+the decrypted key for the session and never hands it to this process:
 
 ```sh
 ssh-add ~/.ssh/id_ed25519        # once per login/session
 sync -c sync.conf
 ```
 
-#### Password from a file (recommended for unattended runs)
+#### Password from a credential store (recommended)
 
-`password_file=` is a *path*, not a secret, so it is safe to commit:
+`password_command=` runs a command and takes the first line of its stdout as the
+secret. The secret lives in the OS keychain, KeePassXC, 1Password, `pass` or a
+vault — never in the config, the environment, or a scan-friendly file:
 
-```ini
-password_file=~/.config/zig-watch-scp/dev.password
-```
+| Store                  | One-time setup                                                                    | `password_command=`                                      |
+| ---------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| macOS Keychain         | `security add-generic-password -s zig-watch-scp-dev -a "$USER" -w`                | `security find-generic-password -s zig-watch-scp-dev -w` |
+| Linux Secret Service   | `secret-tool store --label='zig-watch-scp dev' service zig-watch-scp host dev`    | `secret-tool lookup service zig-watch-scp host dev`      |
+| Windows DPAPI          | PowerShell snippet below                                                          | PowerShell one-liner below                               |
+| 1Password              | sign in once (`op signin`)                                                        | `op read op://Private/zig-watch-scp/password`            |
+| pass                   | `pass insert zig-watch-scp/dev`                                                   | `pass show zig-watch-scp/dev`                            |
 
-Create the file once. The password is typed a single time, never per run, and
-never appears in shell history or the process list:
-
-```sh
-# Linux/macOS
-mkdir -p ~/.config/zig-watch-scp && chmod 700 ~/.config/zig-watch-scp
-read -rsp 'Password for dev: ' P; printf '%s' "$P" > ~/.config/zig-watch-scp/dev.password; unset P
-chmod 600 ~/.config/zig-watch-scp/dev.password
-```
+Windows, using DPAPI so only your Windows account can decrypt the stored blob:
 
 ```powershell
-# Windows PowerShell
-$dir = "$env:USERPROFILE\.config\zig-watch-scp"
-New-Item -ItemType Directory -Force $dir | Out-Null
+# once; prompts without echoing
 $secure = Read-Host -AsSecureString 'Password for dev'
-$plain = [System.Net.NetworkCredential]::new('', $secure).Password
-[System.IO.File]::WriteAllText("$dir\dev.password", $plain)
-icacls "$dir\dev.password" /inheritance:r /grant:r "$($env:USERDOMAIN)\$($env:USERNAME):(R)"
+ConvertFrom-SecureString $secure | Set-Content "$env:APPDATA\zig-watch-scp\dev.dpapi"
 ```
 
-The same mechanism protects an encrypted key's passphrase with
-`passphrase_file=`.
+```ini
+password_command=powershell -NoProfile -Command "$s = Get-Content ($env:APPDATA + '\zig-watch-scp\dev.dpapi'); [System.Net.NetworkCredential]::new('', (ConvertTo-SecureString $s)).Password"
+```
+
+The helper runs with your privileges, exactly like a `git credential` helper: any
+process running as you could ask the same store, but nothing plaintext sits in a
+file that a casual scan (or an agent grepping the home directory) will find. For
+the strongest posture, use the SSH agent or short-lived credentials, where this
+tool never sees a reusable secret.
+
+The same mechanism covers an encrypted key's passphrase with
+`passphrase_command=`. Commands are executed **directly, without a shell**:
+arguments are split on whitespace and may be quoted with `'` or `"`; pipes and
+redirects are not interpreted (use a script if you need them). stdout must be a
+single line; an empty result or a non-zero exit is an error.
+
+#### Secret file (CI mounts and last resorts)
+
+For CI, mount the secret from the CI secret store and point at it — that file is
+not in a home directory:
+
+```sh
+SCP_PASSWORD_FILE=/run/secrets/sync_password sync -c sync.conf
+```
+
+`password_file=` in the config does the same, but **do not keep a plaintext
+password in your home directory**: agents and malware scan for
+`.password`, `.env`, `*.secret`, `id_*` and similar names. If you must use one,
+restrict it with `chmod 600` (POSIX) or `icacls` (Windows), and prefer
+`password_command` instead.
 
 #### Password sources and precedence
 
 For both the password and the passphrase, the first available source wins:
 
-| Priority | Source                                 | Example                                  |
-| -------- | -------------------------------------- | ---------------------------------------- |
-| 1        | `--password-file <path>`               | `sync --password-file ./dev.pass -c ...` |
-| 2        | positional password                    | `sync host user 'secret' -c sync.conf`   |
-| 3        | `SCP_PASSWORD_FILE` (a path)           | `SCP_PASSWORD_FILE=/run/secrets/pw sync` |
-| 4        | `SCP_PASSWORD` (the value)             | `SCP_PASSWORD='secret' sync -c ...`      |
-| 5        | `password_file=` in the config         | `password_file=~/.config/...`            |
-| 6        | `password=` in the config (deprecated) | warns on every run                       |
+| Priority | Source                                    | Example                                   |
+| -------- | ----------------------------------------- | ----------------------------------------- |
+| 1        | `--password-file <path>`                  | `sync --password-file ./dev.pass -c ...`  |
+| 2        | `--password-command <cmd>`                | `sync --password-command 'op read ...'`   |
+| 3        | positional password                       | `sync host user 'secret' -c sync.conf`    |
+| 4        | `SCP_PASSWORD_FILE` (a path)              | `SCP_PASSWORD_FILE=/run/secrets/pw sync`  |
+| 5        | `SCP_PASSWORD_COMMAND` (a command)        | `SCP_PASSWORD_COMMAND='pass show x' sync` |
+| 6        | `SCP_PASSWORD` (the value)                | `SCP_PASSWORD='secret' sync -c ...`       |
+| 7        | `password_command=` in the config         | `password_command=security ... -w`        |
+| 8        | `password_file=` in the config            | `password_file=/run/secrets/sync`         |
+| 9        | `password=` in the config (deprecated)    | warns on every run                        |
 
 The passphrase uses the matching names: `--passphrase-file`,
-`SCP_PASSPHRASE_FILE`, `SCP_PASSPHRASE`, `passphrase_file=`, `passphrase=`.
+`--passphrase-command`, `SCP_PASSPHRASE_FILE`, `SCP_PASSPHRASE_COMMAND`,
+`SCP_PASSPHRASE`, `passphrase_command=`, `passphrase_file=`, `passphrase=`.
 
 #### Why `--var` may not carry a password
 
@@ -505,27 +534,17 @@ PASSWORD or PASSPHRASE are therefore refused for `--var` (and `-D`).
 
 Environment-provided variables are still allowed, because they are the normal
 place for a shell profile or CI secret. They are, however, inherited by child
-processes, which is why the file is preferred over `SCP_PASSWORD` for unattended
-runs.
+processes, which is why a credential-store command or a mounted file is
+preferred over `SCP_PASSWORD` for unattended runs.
 
-#### File rules
+#### Secret file rules
 
 - One line; a single trailing newline (LF or CRLF) is ignored.
 - Empty files and files with more than one line are rejected.
 - The file must be readable only by you. On POSIX a group/world-readable file
   prints a warning with the `chmod 600` command to run; on Windows use `icacls`.
-- Keep it out of the repository and off network shares.
-
-#### CI
-
-Mount the secret as a file and point `SCP_PASSWORD_FILE` at it:
-
-```sh
-SCP_PASSWORD_FILE=/run/secrets/sync_password sync -c sync.conf
-```
-
-`SCP_PASSWORD` works too, but CI systems often expose environment variables to
-child processes and logs, so the file is safer.
+- Keep it out of the repository and off network shares. Prefer a CI-mounted
+  secret over a file under your home directory.
 
 ### SSH Config Support
 

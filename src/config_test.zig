@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-GPL-3.0-with-Commons-Clause
 // Copyright (c) 2026 Davor Hrg
 const std = @import("std");
+const builtin = @import("builtin");
 const config = @import("config.zig");
 const Config = config.Config;
 
@@ -347,9 +348,12 @@ test "config: password source precedence" {
 
     const none = config.Config.SecretSource{
         .cli_file = null,
+        .cli_command = null,
         .cli_value = null,
         .env_file_name = "SYNC_TEST_NO_SUCH_FILE_VAR",
+        .env_command_name = "SYNC_TEST_NO_SUCH_COMMAND_VAR",
         .env_value_name = "SYNC_TEST_NO_SUCH_VALUE_VAR",
+        .config_command = null,
         .config_file = null,
         .config_value = "from-config",
         .what = "password",
@@ -367,6 +371,50 @@ test "config: password source precedence" {
 
     with_cli.cli_file = "test_secret_prec/secret";
     try std.testing.expectEqualStrings("from-file", try config.Config.resolveSecret(allocator, io, std.testing.environ, with_cli));
+}
+
+test "config: password_command is parsed" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cfg = try parseConfigFile(arena, std.testing.io, "test_secret_commands.conf",
+        \\password_command = security find-generic-password -s sync-dev -w
+        \\passphrase_command = secret-tool lookup service sync passphrase
+        \\[folder]
+        \\local_dir = ./src
+        \\remote_dir = /srv/src
+    );
+
+    try std.testing.expectEqualStrings("security find-generic-password -s sync-dev -w", cfg.password_command.?);
+    try std.testing.expectEqualStrings("secret-tool lookup service sync passphrase", cfg.passphrase_command.?);
+}
+
+test "config: secret command reads a single line" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The command is executed directly (no shell), so use a real executable.
+    const command = if (builtin.os.tag == .windows) "cmd.exe /C echo s3cret" else "echo s3cret";
+    const secret = try config.Config.runSecretCommand(arena, std.testing.io, command, "password");
+    try std.testing.expectEqualStrings("s3cret", secret);
+}
+
+test "config: secret command failures are rejected" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+
+    const fail_command = if (builtin.os.tag == .windows) "cmd.exe /C exit 3" else "sh -c 'exit 3'";
+    try std.testing.expectError(error.SecretCommandFailed, config.Config.runSecretCommand(arena, io, fail_command, "password"));
+
+    const empty_command = if (builtin.os.tag == .windows) "cmd.exe /C echo." else "echo \"\"";
+    try std.testing.expectError(error.SecretCommandInvalid, config.Config.runSecretCommand(arena, io, empty_command, "password"));
+
+    const multi_command = if (builtin.os.tag == .windows) "cmd.exe /C echo one && echo two" else "sh -c 'printf \"one\\ntwo\\n\"'";
+    try std.testing.expectError(error.SecretCommandInvalid, config.Config.runSecretCommand(arena, io, multi_command, "password"));
 }
 
 test "config: password_file and passphrase_file are parsed" {
